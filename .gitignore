@@ -1,0 +1,21 @@
+# Sanal ortam
+llm/
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+
+# PyCharm
+.idea/
+
+# Eğitim çıktıları / model ağırlıkları (repoya taşınmasın, çok büyük olur)
+niyet_bert_model/
+niyet_bert_results/
+temp_dataset.jsonl
+
+# İşletim sistemi
+.DS_Store
+Thumbs.db
