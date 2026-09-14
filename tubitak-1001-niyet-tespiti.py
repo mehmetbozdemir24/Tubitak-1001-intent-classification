@@ -48,6 +48,9 @@ if "classes" not in st.session_state:
 if "dpo_dataset_buffer" not in st.session_state:
     st.session_state.dpo_dataset_buffer = []
 
+# DPO verilerinin diske yazılacağı sabit dosya yolu
+DPO_OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dpo_dataset.jsonl")
+
 # ------------------------------------------------------------------
 # TASARIM SİSTEMİ — "Lab Console" tema
 # Koyu, teknik bir enstrüman-paneli hissi: sinyal teali vurgu rengi,
@@ -358,29 +361,149 @@ with tab1:
                         st.success("Model başarıyla eğitildi ve kaydedildi.")
 
         else:
-            model_path = st.text_input("Model Klasör Yolu", value="./niyet_bert_model")
-            if st.button("Modeli Yükle", type="primary", use_container_width=True):
+            def find_local_model_folders(base_path="."):
+                model_dirs = []
+                try:
+                    for root, dirs, files in os.walk(base_path):
+                        dirs[:] = [d for d in dirs if not d.startswith((".", "__"))]
+                        if "config.json" in files or "classes.npy" in files or "model.safetensors" in files:
+                            rel_p = os.path.relpath(root, base_path).replace("\\", "/")
+                            model_dirs.append(f"./{rel_p}" if rel_p != "." else "./")
+                except Exception:
+                    pass
+                if not model_dirs:
+                    model_dirs = ["./niyet_bert_model"]
+                return sorted(list(set(model_dirs)))
+
+            bulunan_modeller = find_local_model_folders(".")
+
+            if "selected_model_path" not in st.session_state:
+                st.session_state.selected_model_path = "./niyet_bert_model"
+
+            st.markdown("##### Model Klasörü Seçimi")
+
+            # Dropdown: Otomatik bulunan modeller
+            secenekler = bulunan_modeller + ["✍️ Başka bir yol girmek istiyorum"]
+            suanki_idx = 0
+            if st.session_state.selected_model_path in secenekler:
+                suanki_idx = secenekler.index(st.session_state.selected_model_path)
+
+            secilen_dropdown = st.selectbox(
+                "🔍 Tespit Edilen Model Klasörleri:",
+                secenekler,
+                index=suanki_idx,
+                help="Proje dizininde otomatik bulunan BERT model klasörleri. Listede yoksa alttaki kutuya tam yolu yazın.",
+            )
+
+            # Dropdown'dan seçim yapıldıysa text input'u güncelle
+            if secilen_dropdown != "✍️ Başka bir yol girmek istiyorum":
+                st.session_state.selected_model_path = secilen_dropdown
+
+            # Manuel yol girişi
+            model_path = st.text_input(
+                "✏️ Model Klasör Yolu (listedeki seçimi değiştirmek veya farklı yol girmek için):",
+                value=st.session_state.selected_model_path,
+                key="model_path_input",
+                placeholder="Örn: ./niyet_bert_model veya C:/modeller/bert_niyet",
+            )
+            st.session_state.selected_model_path = model_path
+
+            # Yol bilgisi/uyarı
+            if model_path and os.path.exists(model_path):
+                st.caption(f"✅ Klasör mevcut: `{os.path.abspath(model_path)}`")
+            elif model_path:
+                st.caption(f"⚠️ Klasör bulunamadı: `{model_path}`")
+
+            if st.button("🚀 Modeli Yükle", type="primary", use_container_width=True):
                 if os.path.exists(model_path):
-                    tokenizer = AutoTokenizer.from_pretrained(model_path)
-                    model = AutoModelForSequenceClassification.from_pretrained(
-                        model_path
-                    )
-                    classes_file = os.path.join(model_path, "classes.npy")
-                    if os.path.exists(classes_file):
-                        classes = np.load(classes_file, allow_pickle=True)
-                        label_encoder = LabelEncoder()
-                        label_encoder.classes_ = classes
-                        st.session_state.model = model
-                        st.session_state.tokenizer = tokenizer
-                        st.session_state.label_encoder = label_encoder
-                        st.session_state.classes = label_encoder.classes_
-                        st.session_state.eval_results = {
-                            "eval_accuracy": 1.0,
-                            "eval_f1": 1.0,
-                            "eval_precision": 1.0,
-                            "eval_recall": 1.0,
-                        }
-                        st.success("Model başarıyla yüklendi.")
+                    with st.spinner("Model yükleniyor..."):
+                        try:
+                            tokenizer = AutoTokenizer.from_pretrained(model_path)
+                            device = "cuda" if torch.cuda.is_available() else "cpu"
+                            model = AutoModelForSequenceClassification.from_pretrained(
+                                model_path
+                            ).to(device)
+                            classes_file = os.path.join(model_path, "classes.npy")
+                            if os.path.exists(classes_file):
+                                classes = np.load(classes_file, allow_pickle=True)
+                            elif hasattr(model.config, "id2label") and model.config.id2label:
+                                classes = [model.config.id2label[i] for i in sorted(model.config.id2label.keys())]
+                            else:
+                                classes = np.array([f"Sinif_{i}" for i in range(model.config.num_labels)])
+
+                            # Gerçek metrikleri trainer_state.json'dan oku
+                            def metrikleri_yukle(model_klasoru):
+                                aralinacak_yerler = [
+                                    model_klasoru,
+                                    os.path.join(os.path.dirname(model_klasoru), "niyet_bert_results"),
+                                    "./niyet_bert_results",
+                                ]
+                                for yer in aralinacak_yerler:
+                                    if not os.path.exists(yer):
+                                        continue
+
+                                    # Doğrudan trainer_state.json var mı?
+                                    state_file = os.path.join(yer, "trainer_state.json")
+                                    if os.path.exists(state_file):
+                                        with open(state_file, "r", encoding="utf-8") as f:
+                                            state = json.load(f)
+                                        log_history = state.get("log_history", [])
+                                        eval_logs = [e for e in log_history if "eval_accuracy" in e]
+                                        if eval_logs:
+                                            return max(eval_logs, key=lambda x: x.get("eval_f1", 0))
+
+                                    # Alt klasörlerdeki checkpoint'leri SAYISAL olarak sırala (en büyük step = son epoch)
+                                    checkpoints = []
+                                    for item in os.listdir(yer):
+                                        item_path = os.path.join(yer, item)
+                                        if os.path.isdir(item_path) and item.startswith("checkpoint-"):
+                                            try:
+                                                step_no = int(item.split("-")[-1])
+                                                checkpoints.append((step_no, item_path))
+                                            except ValueError:
+                                                pass
+
+                                    # En büyük step numarasından başlayarak oku
+                                    for _, cp_path in sorted(checkpoints, reverse=True):
+                                        cp_state = os.path.join(cp_path, "trainer_state.json")
+                                        if os.path.exists(cp_state):
+                                            with open(cp_state, "r", encoding="utf-8") as f:
+                                                state = json.load(f)
+                                            log_history = state.get("log_history", [])
+                                            eval_logs = [e for e in log_history if "eval_accuracy" in e]
+                                            if eval_logs:
+                                                # En yüksek F1 skorlu logu döndür
+                                                return max(eval_logs, key=lambda x: x.get("eval_f1", 0))
+                                return None
+
+                            gercek_metrikler = metrikleri_yukle(model_path)
+
+                            label_encoder = LabelEncoder()
+                            label_encoder.classes_ = classes
+                            st.session_state.model = model
+                            st.session_state.tokenizer = tokenizer
+                            st.session_state.label_encoder = label_encoder
+                            st.session_state.classes = label_encoder.classes_
+                            st.session_state.cm = None  # Yüklemede cm yok
+
+                            if gercek_metrikler:
+                                st.session_state.eval_results = gercek_metrikler
+                                st.session_state.metrics_source = "trainer_state"
+                            else:
+                                st.session_state.eval_results = None
+                                st.session_state.metrics_source = "none"
+
+                            st.success(f"✅ Model başarıyla yüklendi! ({len(classes)} sınıf · Cihaz: {device.upper()})")
+                            if gercek_metrikler:
+                                acc = gercek_metrikler.get("eval_accuracy", 0)
+                                f1 = gercek_metrikler.get("eval_f1", 0)
+                                st.info(f"📊 Performans sonuçları yüklendi — Accuracy: **{acc:.4f}** · F1: **{f1:.4f}**")
+                            else:
+                                st.warning("⚠️ Bu model için kayıtlı performans sonucu bulunamadı. '02 · Performans' sekmesinde değerlendirme yapabilirsiniz.")
+                        except Exception as err:
+                            st.error(f"Model yüklenirken hata oluştu: {err}")
+                else:
+                    st.error(f"❌ Belirtilen klasör bulunamadı: `{model_path}`")
 
 
 with tab2:
@@ -563,9 +686,11 @@ with tab4:
 
         excel_path = "Ders_konu_bilissel-seviye_öğrenme-çıktısı.xlsx"
 
-        if st.session_state.model is not None and gemini_api_key:
+        if st.session_state.model is not None:
 
             def modelle_tahmin_et(metin):
+                if not metin or not metin.strip():
+                    return None, []
                 model = st.session_state.model
                 tokenizer = st.session_state.tokenizer
                 label_encoder = st.session_state.label_encoder
@@ -595,7 +720,15 @@ with tab4:
                 )
                 return tahmin, sirali_probs
 
-            def otomatik_soru_uret():
+            def otomatik_soru_uret(kapsam_disi_mod="tamamen_farkli"):
+                """
+                kapsam_disi_mod:
+                  'tamamen_farkli' → günlük hayat konusu (okulla hiç ilgisi yok)
+                  'excel'          → Excel'deki ders konusunu kullan ama kapsam dışı bir talep yaz
+                """
+                if not gemini_api_key:
+                    st.error("Otomatik soru üretimi için lütfen yukarıdaki alana Gemini API anahtarınızı girin.")
+                    return False
                 try:
                     df_excel = pd.read_excel(excel_path)
                     if "Konu Adı" not in df_excel.columns:
@@ -614,26 +747,88 @@ with tab4:
                     if "Aşırı Zorlayıcı" in secilen_zorluk:
                         stil_talimati = f"NİYETİN: '{hedef_niyet}' kategorisine ait olmak. Ancak cümlede başka niyetlerin kelimelerini çeldirici olarak kullanarak modeli şaşırt ve zorla."
                     else:
-                        stil_talimati = (
-                            f"'{hedef_niyet}' kategorisine uygun doğal bir talep ilet."
-                        )
+                        stil_talimati = f"'{hedef_niyet}' kategorisine uygun doğal bir talep ilet."
 
                     if "Kısa" in secilen_uzunluk:
                         uzunluk_talimati = "Cümle tek parça, kısa ve öz olsun."
                     elif "Uzun" in secilen_uzunluk:
-                        uzunluk_talimati = (
-                            "Cümle detaylı, bağlam içeren uzun bir cümle olsun."
-                        )
+                        uzunluk_talimati = "Cümle detaylı, bağlam içeren uzun bir cümle olsun."
                     else:
                         uzunluk_talimati = "Cümle standart orta uzunlukta olsun."
 
                     client = genai.Client(api_key=gemini_api_key)
-                    prompt_to_gemini = (
-                        f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n"
-                        f"GÖREV: {stil_talimati}\n"
-                        f"UZUNLUK: {uzunluk_talimati}\n"
-                        f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+
+                    # Kapsam_Dışı tespiti
+                    _siniflar = list(st.session_state.classes) if st.session_state.classes is not None else []
+                    hedef_kapsam_disi = (
+                        "kapsam" in hedef_niyet.lower()
+                        or "disi" in hedef_niyet.lower()
+                        or "dışı" in hedef_niyet.lower()
                     )
+
+                    if hedef_kapsam_disi and kapsam_disi_mod == "excel":
+                        # Mod 1: Excel'deki ders konusunu kullan ama kapsam dışı talep yaz
+                        # Örn: Matematik konusunda ama "bunu arkadaşıma nasıl anlatabilirim?"
+                        kapsam_disi_talepler = [
+                            "bu konuyu arkadaşıma nasıl anlatabilirim",
+                            "bu konuyla ilgili kitap önerir misin",
+                            "bu konuyu kimler icat etmiş",
+                            "bu konunun tarihi nedir",
+                            "bu konuyla ilgili film veya belgesel var mı",
+                            "bu konuyu öğrenmenin ne faydası var",
+                            "bu konuyu sevmiyorum ne yapmalıyım",
+                            "bu konuyla ilgili yarışmalar var mı",
+                            "bu konuyu gelecekte kullanacak mıyım",
+                            "bu konuda kariyer yapabilir miyim",
+                        ]
+                        secilen_talep = random.choice(kapsam_disi_talepler)
+                        prompt_to_gemini = (
+                            f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
+                            f"Sistem yalnızca şu kategorilerdeki istekleri işliyor: {', '.join(_siniflar[:6])} vb.\n"
+                            f"GÖREV: '{secilen_konu}' konusundan bahseden ama sisteme uygun bir DERS TALEBİ (soru sorma, "
+                            f"alıştırma isteme, açıklama isteme vb.) olmayan, bunun yerine '{secilen_talep}' "
+                            f"şeklinde bir mesaj yaz. Bu mesaj sisteme kapsam dışı görünmeli.\n"
+                            f"UZUNLUK: {uzunluk_talimati}\n"
+                            f"KURAL: Sadece öğrencinin kuracağı TEK BİR doğal cümle ver. Kategori adını yazma."
+                        )
+                        st.session_state.secilen_excel_konusu = f"{secilen_konu} → [Excel Konusu, Kapsam Dışı]"
+
+                    elif hedef_kapsam_disi and kapsam_disi_mod == "tamamen_farkli":
+                        # Mod 2: Okulla hiç ilgisi olmayan günlük hayat sorusu
+                        kapsam_disi_temalar = [
+                            "günlük alışveriş (market, sebze, meyve fiyatları)",
+                            "hava durumu ve mevsimler",
+                            "yemek tarifi veya restoranlar",
+                            "spor maçları ve sporcular",
+                            "film, dizi veya müzik",
+                            "seyahat ve tatil planları",
+                            "araç, taşıt veya trafik",
+                            "sağlık, ilaç veya doktor",
+                            "moda, kıyafet ve alışveriş",
+                            "evcil hayvanlar ve doğa",
+                            "politik haberler veya ekonomi",
+                            "sosyal medya ve internet",
+                        ]
+                        kapsam_disi_tema = random.choice(kapsam_disi_temalar)
+                        prompt_to_gemini = (
+                            f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
+                            f"Bu sistem yalnızca ders/eğitim sorularını yanıtlamak için tasarlanmış.\n"
+                            f"GÖREV: Eğitimle, okulla, derslerle veya akademik konularla HİÇBİR İLGİSİ OLMAYAN, "
+                            f"tamamen alakasız ve konu dışı bir mesaj yaz. Tema: {kapsam_disi_tema}\n"
+                            f"UZUNLUK: {uzunluk_talimati}\n"
+                            f"KURAL: Mesajda ders, ödev, konu, formül, öğretmen, okul gibi eğitimle ilgili hiçbir "
+                            f"kelime KULLANMA. Sadece sıradan bir kullanıcının kuracağı TEK BİR cümle ver."
+                        )
+                        st.session_state.secilen_excel_konusu = f"[Kapsam Dışı - {kapsam_disi_tema}]"
+
+                    else:
+                        # Normal niyet kategorisi
+                        prompt_to_gemini = (
+                            f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n"
+                            f"GÖREV: {stil_talimati}\n"
+                            f"UZUNLUK: {uzunluk_talimati}\n"
+                            f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                        )
 
                     response = client.models.generate_content(
                         model=gemini_model_secimi, contents=prompt_to_gemini
@@ -657,39 +852,85 @@ with tab4:
                     return False
 
             if "generated_test_text" not in st.session_state:
-                if st.button(
-                    "Veri Toplamaya Başla (İlk Soruyu Üret)",
-                    type="primary",
-                    use_container_width=True,
-                ):
-                    if not os.path.exists(excel_path):
-                        st.error(f"'{excel_path}' dosyası bulunamadı.")
-                    else:
-                        with st.spinner("İlk soru hazırlanıyor..."):
-                            if otomatik_soru_uret():
-                                st.rerun()
+                st.session_state.generated_test_text = ""
 
-            else:
+            if st.session_state.get("secilen_excel_konusu"):
                 st.markdown(
                     f"<span class='status-badge'>KONU · {st.session_state.get('secilen_excel_konusu', '')}</span>",
                     unsafe_allow_html=True,
                 )
-                st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-                guncel_soru = st.text_area(
-                    "Üretilen Soru (isterseniz düzenleyebilirsiniz):",
-                    value=st.session_state.generated_test_text,
-                    height=80,
-                )
+            guncel_soru = st.text_area(
+                "Değerlendirilecek Soru / Cümle (Gemini'nin ürettiğini düzenleyebilir veya doğrudan kendi cümlenizi yazabilirsiniz):",
+                value=st.session_state.generated_test_text,
+                height=90,
+                placeholder="Örn: Yapay zeka öğretmenim, bu formülün nereden geldiğini açıklar mısınız?",
+            )
 
-                if guncel_soru != st.session_state.generated_test_text:
-                    st.session_state.generated_test_text = guncel_soru
-                    tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
-                    st.session_state.bert_prediction = tahmin
-                    st.session_state.bert_probabilities = sirali_probs
-                    st.rerun()
+            # Kapsam_Dışı tespiti (buton düzeni için)
+            _hedef = secilen_hedef_kategori if secilen_hedef_kategori != "Rastgele (Otomatik)" else ""
+            _kapsam_secili = (
+                "kapsam" in _hedef.lower()
+                or "disi" in _hedef.lower()
+                or "dışı" in _hedef.lower()
+            )
 
-                # Olasılık Dağılımı Kartı
+            if _kapsam_secili and gemini_api_key:
+                # Kapsam_Dışı seçili → tam satır tahmin butonu + altında iki üretim modu
+                if st.button("🔍 Yazılan Cümleyi Modele Tahmin Ettir", type="primary", use_container_width=True):
+                    if guncel_soru.strip():
+                        st.session_state.generated_test_text = guncel_soru
+                        tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
+                        st.session_state.bert_prediction = tahmin
+                        st.session_state.bert_probabilities = sirali_probs
+                        st.rerun()
+                    else:
+                        st.warning("Lütfen tahmin için bir metin girin.")
+
+                col_kd1, col_kd2 = st.columns(2)
+                with col_kd1:
+                    if st.button("📚 Gemini ile Üret — Excel Konusu (Zor/Çeldirici)",
+                                 use_container_width=True,
+                                 help="Excel'deki bir ders konusunu kullanır ama kapsam dışı bir talep yazar. Model için zor örnekler."):
+                        st.session_state.son_kapsam_disi_mod = "excel"
+                        with st.spinner("Soru hazırlanıyor..."):
+                            if otomatik_soru_uret(kapsam_disi_mod="excel"):
+                                st.rerun()
+                with col_kd2:
+                    if st.button("🌀 Gemini ile Üret — Günlük Hayat Konusu",
+                                 use_container_width=True,
+                                 help="Okulla hiç ilgisi olmayan günlük hayat sorusu üretir."):
+                        st.session_state.son_kapsam_disi_mod = "tamamen_farkli"
+                        with st.spinner("Soru hazırlanıyor..."):
+                            if otomatik_soru_uret(kapsam_disi_mod="tamamen_farkli"):
+                                st.rerun()
+            else:
+                # Normal kategori → iki buton yan yana (eski düzen)
+                col_act1, col_act2 = st.columns(2)
+                with col_act1:
+                    if st.button("🔍 Yazılan Cümleyi Modele Tahmin Ettir", type="primary", use_container_width=True):
+                        if guncel_soru.strip():
+                            st.session_state.generated_test_text = guncel_soru
+                            tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
+                            st.session_state.bert_prediction = tahmin
+                            st.session_state.bert_probabilities = sirali_probs
+                            st.rerun()
+                        else:
+                            st.warning("Lütfen tahmin için bir metin girin.")
+                with col_act2:
+                    if st.button("🎲 Gemini ile Yeni Soru Üret", use_container_width=True):
+                        with st.spinner("Yeni soru hazırlanıyor..."):
+                            if otomatik_soru_uret():
+                                st.rerun()
+
+            # Eğer kullanıcı metni değiştirdiyse ancak butona basmadıysa da güncel tutalım
+            if guncel_soru != st.session_state.generated_test_text:
+                st.session_state.generated_test_text = guncel_soru
+
+            # Olasılık Dağılımı ve Tahmin Kartı
+            if st.session_state.get("bert_prediction"):
+                st.markdown("---")
                 col_tahmin, col_dagilim = st.columns([1, 2])
                 with col_tahmin:
                     st.markdown("##### Model Tahmini")
@@ -697,10 +938,11 @@ with tab4:
                         f"<span class='tag-rejected' style='font-size:14px; padding:8px 14px;'>{st.session_state.bert_prediction} · REJECTED</span>",
                         unsafe_allow_html=True,
                     )
+                    st.caption("Model bu tahmini yaptı. Eğer bu tahmin yanlışsa DPO çiftinde 'REJECTED' olarak kaydedilecektir.")
 
                 with col_dagilim:
                     st.markdown("##### Model Olasılık Dağılımı")
-                    if "bert_probabilities" in st.session_state:
+                    if "bert_probabilities" in st.session_state and st.session_state.bert_probabilities:
                         rows_html = ""
                         for i, (sinif_adi, olasilik) in enumerate(
                             st.session_state.bert_probabilities
@@ -717,8 +959,11 @@ with tab4:
 
                 st.markdown("---")
 
+                # CHOSEN seçimi: Eğer yukarıda belirli bir hedef kategori seçilmişse onu varsayılan yap
                 default_idx = 0
-                if st.session_state.bert_prediction in st.session_state.classes:
+                if secilen_hedef_kategori != "Rastgele (Otomatik)" and secilen_hedef_kategori in st.session_state.classes:
+                    default_idx = list(st.session_state.classes).index(secilen_hedef_kategori)
+                elif st.session_state.bert_prediction in st.session_state.classes:
                     default_idx = list(st.session_state.classes).index(
                         st.session_state.bert_prediction
                     )
@@ -733,74 +978,142 @@ with tab4:
                 col_btn1, col_btn2 = st.columns(2)
 
                 if col_btn1.button(
-                    "Kaydet ve Sıradakine Geç", type="primary", use_container_width=True
+                    "💾 Kaydet ve Sıradakine Geç", type="primary", use_container_width=True
                 ):
-                    if st.session_state.bert_prediction == gercek_dogru_kategori:
-                        st.error(
-                            "Model zaten doğru tahmin etti. DPO çifti için modelin yanılması gerekir."
-                        )
+                    # En güncel metni ve tahmini al
+                    aktif_metin = guncel_soru.strip()
+                    if not aktif_metin:
+                        st.error("Metin kutusu boş olamaz.")
                     else:
-                        dpo_pair = {
-                            "prompt": st.session_state.generated_test_text,
-                            "chosen": gercek_dogru_kategori,
-                            "rejected": st.session_state.bert_prediction,
-                            "konu": st.session_state.get("secilen_excel_konusu", ""),
-                        }
-                        st.session_state.dpo_dataset_buffer.append(dpo_pair)
-
-                        with st.status(
-                            "İşlem kaydediliyor ve yeni soru üretiliyor...",
-                            expanded=True,
-                        ) as status:
-                            st.write("Veri tampon belleğe eklendi.")
-                            otomatik_soru_uret()
-                            status.update(
-                                label="Hazır.", state="complete", expanded=False
+                        aktif_tahmin, _ = modelle_tahmin_et(aktif_metin)
+                        if aktif_tahmin == gercek_dogru_kategori:
+                            st.error(
+                                f"Model tahmini ({aktif_tahmin}) ile seçtiğiniz CHOSEN kategori ({gercek_dogru_kategori}) aynı. DPO çifti için modelin hatalı tahmini (REJECTED) ile gerçek doğru (CHOSEN) farklı olmalıdır."
                             )
-                        st.rerun()
+                        else:
+                            dpo_pair = {
+                                "prompt": aktif_metin,
+                                "chosen": gercek_dogru_kategori,
+                                "rejected": aktif_tahmin,
+                                "konu": st.session_state.get("secilen_excel_konusu", "Manuel Giriş"),
+                            }
+                            st.session_state.dpo_dataset_buffer.append(dpo_pair)
+
+                            # Diske anında kaydet (append mod — üzerine ekler)
+                            try:
+                                with open(DPO_OUTPUT_FILE, "a", encoding="utf-8") as f_out:
+                                    f_out.write(json.dumps(dpo_pair, ensure_ascii=False) + "\n")
+                                disk_kayit_ok = True
+                            except Exception as disk_err:
+                                disk_kayit_ok = False
+                                st.warning(f"⚠️ Diske yazılamadı: {disk_err}")
+
+                            with st.status(
+                                "İşlem kaydediliyor...",
+                                expanded=True,
+                            ) as status:
+                                if disk_kayit_ok:
+                                    st.write(f"✅ Diske kaydedildi → `{DPO_OUTPUT_FILE}`")
+                                else:
+                                    st.write("💾 Tampon belleğe eklendi (disk yazımı başarısız).")
+                                if gemini_api_key:
+                                    otomatik_soru_uret(
+                                        kapsam_disi_mod=st.session_state.get("son_kapsam_disi_mod", "tamamen_farkli")
+                                    )
+                                else:
+                                    st.session_state.generated_test_text = ""
+                                    st.session_state.bert_prediction = None
+                                    st.session_state.bert_probabilities = []
+                                status.update(
+                                    label="Hazır.", state="complete", expanded=False
+                                )
+                            st.rerun()
 
                 if col_btn2.button(
-                    "Soruyu At ve Sıradakine Geç", use_container_width=True
+                    "⏭️ Soruyu At ve Yenisini Üret", use_container_width=True
                 ):
                     with st.status(
                         "Soru atlanıyor, yenisi hazırlanıyor...", expanded=True
                     ) as status:
-                        st.write("Excel'den yeni konu seçiliyor.")
-                        otomatik_soru_uret()
+                        if gemini_api_key:
+                            otomatik_soru_uret(
+                                kapsam_disi_mod=st.session_state.get("son_kapsam_disi_mod", "tamamen_farkli")
+                            )
+                        else:
+                            st.session_state.generated_test_text = ""
+                            st.session_state.bert_prediction = None
+                            st.session_state.bert_probabilities = []
                         status.update(label="Hazır.", state="complete", expanded=False)
                     st.rerun()
 
-            if st.session_state.dpo_dataset_buffer:
-                st.markdown("---")
-                st.subheader("Toplu DPO Veri Havuzu Yönetimi")
-                st.markdown(
-                    f"<span class='metric-badge'>{len(st.session_state.dpo_dataset_buffer)} DPO ÇİFTİ</span> "
-                    f"<span style='color:var(--text-muted); font-size:13px;'>oturum boyunca biriken geçerli çift sayısı</span>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+            # --- DPO Veri Havuzu Yönetimi (her zaman göster, dosya varsa) ---
+            st.markdown("---")
+            st.subheader("📦 DPO Veri Havuzu Yönetimi")
 
-                jsonl_data = "\n".join(
-                    [
-                        json.dumps(item, ensure_ascii=False)
-                        for item in st.session_state.dpo_dataset_buffer
-                    ]
-                )
+            # Disk dosyasından toplam kayıt sayısını oku
+            disk_kayit_sayisi = 0
+            if os.path.exists(DPO_OUTPUT_FILE):
+                try:
+                    with open(DPO_OUTPUT_FILE, "r", encoding="utf-8") as f_read:
+                        disk_kayit_sayisi = sum(1 for line in f_read if line.strip())
+                except Exception:
+                    disk_kayit_sayisi = 0
 
-                col_down1, col_down2 = st.columns(2)
+            oturum_kayit_sayisi = len(st.session_state.dpo_dataset_buffer)
+
+            col_stat1, col_stat2, col_stat3 = st.columns(3)
+            col_stat1.metric("Bu Oturumda Eklenen", f"{oturum_kayit_sayisi} çift")
+            col_stat2.metric("Dosyada Toplam Kayıt", f"{disk_kayit_sayisi} çift")
+            col_stat3.metric(
+                "Kayıt Dosyası",
+                os.path.basename(DPO_OUTPUT_FILE),
+                help=DPO_OUTPUT_FILE,
+            )
+
+            if disk_kayit_sayisi > 0 or oturum_kayit_sayisi > 0:
+                st.caption(f"📁 Dosya konumu: `{DPO_OUTPUT_FILE}`")
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+                # Disk dosyasını oku (indirme için)
+                try:
+                    if os.path.exists(DPO_OUTPUT_FILE):
+                        with open(DPO_OUTPUT_FILE, "r", encoding="utf-8") as f_dl:
+                            disk_icerik = f_dl.read()
+                    else:
+                        disk_icerik = "\n".join(
+                            json.dumps(item, ensure_ascii=False)
+                            for item in st.session_state.dpo_dataset_buffer
+                        )
+                except Exception:
+                    disk_icerik = ""
+
+                col_down1, col_down2, col_down3 = st.columns(3)
                 with col_down1:
                     st.download_button(
-                        label="Tüm Biriken DPO Verilerini İndir (.jsonl)",
-                        data=jsonl_data,
-                        file_name="insan_denetimli_zorlayici_dpo_dataseti.jsonl",
+                        label=f"⬇️ Tüm DPO Verisini İndir ({disk_kayit_sayisi} kayıt)",
+                        data=disk_icerik,
+                        file_name="dpo_dataset.jsonl",
                         mime="text/plain",
                         type="primary",
                         use_container_width=True,
+                        disabled=(len(disk_icerik.strip()) == 0),
                     )
                 with col_down2:
-                    if st.button("Hafızayı Temizle", use_container_width=True):
+                    if st.button("🗑️ Hafızayı Temizle (Oturum)", use_container_width=True):
                         st.session_state.dpo_dataset_buffer = []
                         st.rerun()
+                with col_down3:
+                    if st.button("⚠️ Disk Dosyasını Sıfırla", use_container_width=True):
+                        try:
+                            if os.path.exists(DPO_OUTPUT_FILE):
+                                os.remove(DPO_OUTPUT_FILE)
+                            st.session_state.dpo_dataset_buffer = []
+                            st.success("Disk dosyası silindi, hafıza temizlendi.")
+                            st.rerun()
+                        except Exception as del_err:
+                            st.error(f"Dosya silinemedi: {del_err}")
+            else:
+                st.info("Henüz kaydedilmiş DPO verisi yok. 'Kaydet ve Sıradakine Geç' ile veri eklemeye başlayın.")
         else:
             st.warning(
                 "Lütfen önce model yükleyin ve yukarıdaki alana Gemini API anahtarınızı girin."
