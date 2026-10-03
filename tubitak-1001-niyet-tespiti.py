@@ -141,13 +141,25 @@ URETIM_USLUPLARI = [
     "Önce kısa bir bağlam/durum anlat, sonra isteği belirt.",
 ]
 
+# Sınıfların doğal dil karşılıkları — talimatta sınıf ADI yerine bunlar kullanılır,
+# böylece Gemini'ye teknik etiket değil öğrencinin gerçekte kuracağı istek aktarılır.
+SINIF_DOGAL_ADLARI = {
+    "Bilgi_Karti": "bilgi kartı / flashcard",
+    "Anahtar_Kavram_Ozet": "özet",
+    "Kavramsal_Soru": "bana düşündürücü bir soru sorulması",
+    "Uyarlanabilir_Soru": "seviyeme göre zorlaşan sorular",
+    "Yanlis_Cevap_Aciklama": "yanlış cevabımın açıklanması",
+    "Kapsam_Disi": "ders dışı sohbet",
+}
+
 # "Aşırı Zorlayıcı" modunda kullanılacak çeldirici teknikleri
+# Şablonlardaki {celdirici_dogal} / {hedef_dogal} alanları SINIF_DOGAL_ADLARI'ndan doldurulur.
 CELDIRICI_TEKNIKLERI = [
-    "Başka bir sınıfın imza kelimesini olumsuzlayarak başla (örn. 'özet istemiyorum, ...'), sonra asıl isteği belirt.",
-    "'{celdirici} yerine {hedef}' kalıbıyla asıl isteği netleştir.",
+    "Çeldirici isteği olumsuzlayarak başla (örn. '{celdirici_dogal} istemiyorum, ...'), sonra asıl isteği belirt.",
+    "'{celdirici_dogal} yerine {hedef_dogal}' kalıbıyla asıl isteği netleştir.",
     "Geçmiş bir olay anlatarak başla (örn. 'dün ... yanlış yaptım ama ...'), sonra asıl isteğe geç.",
     "Asıl isteği bir sohbetin/durumun içine gömerek ilet.",
-    "Hedef sınıfın imza kelimesini (örn. 'kart', 'özet' gibi) hiç kullanmadan, dolaylı biçimde iste.",
+    "Asıl isteğin imza kelimesini ('{hedef_dogal}' ifadesini) hiç kullanmadan, dolaylı biçimde iste.",
 ]
 
 # Kapsam_Dışı "excel" modunda kullanılacak sabit kapsam dışı talepler
@@ -176,6 +188,11 @@ def _sinif_kisa_tanim(sinif_adi):
     """Bir sınıfın SINIF_TANIMLARI içindeki kısa tanımını döndürür (bulunamazsa sınıf adını)."""
     bilgi = SINIF_TANIMLARI.get(sinif_adi)
     return bilgi["tanim"] if bilgi else sinif_adi
+
+
+def _sinif_dogal_ad(sinif_adi):
+    """Bir sınıfın doğal dil karşılığını döndürür (bulunamazsa sınıf adının kendisi)."""
+    return SINIF_DOGAL_ADLARI.get(sinif_adi, sinif_adi)
 
 
 def _hedef_tanimini_formatla(hedef_niyet):
@@ -966,6 +983,9 @@ with tab4:
                             "sosyal medya ve internet",
                         ]
                         kapsam_disi_tema = random.choice(kapsam_disi_temalar)
+                        # Günlük hayat mesajında öğretmene hitap doğal olmadığı için "Hocam"lı üslubu hariç tut
+                        gunluk_usluplar = [u for u in URETIM_USLUPLARI if "Hocam" not in u]
+                        secilen_uslup = random.choice(gunluk_usluplar)
                         prompt_to_gemini = (
                             f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
                             f"Bu sistem yalnızca ders/eğitim sorularını yanıtlamak için tasarlanmış.\n"
@@ -994,7 +1014,8 @@ with tab4:
                             celdirici_sinif = random.choice(diger_siniflar) if diger_siniflar else hedef_niyet
                             celdirici_tanim_metni = _celdirici_sinifi_formatla(celdirici_sinif)
                             celdirici_teknik = random.choice(CELDIRICI_TEKNIKLERI).format(
-                                celdirici=celdirici_sinif, hedef=hedef_niyet
+                                celdirici_dogal=_sinif_dogal_ad(celdirici_sinif),
+                                hedef_dogal=_sinif_dogal_ad(hedef_niyet),
                             )
                             gorev_metni = (
                                 f"GÖREV: Cümlenin ASIL isteği {hedef_niyet} olmalı. Yanıtta {celdirici_sinif} sınıfının "
@@ -1128,9 +1149,12 @@ with tab4:
                             if otomatik_soru_uret():
                                 st.rerun()
 
-            # Eğer kullanıcı metni değiştirdiyse ancak butona basmadıysa da güncel tutalım
+            # Eğer kullanıcı metni değiştirdiyse ancak butona basmadıysa da güncel tutalım.
+            # Metin değiştiği için önceki "Nihai karar" seçimi artık geçerli değil; sayacı
+            # artırarak seçimi sıfırlıyoruz (bu blok selectbox render edilmeden önce çalışır).
             if guncel_soru != st.session_state.generated_test_text:
                 st.session_state.generated_test_text = guncel_soru
+                _uretim_sayacini_artir()
 
             # Olasılık Dağılımı ve Tahmin Kartı
             if st.session_state.get("bert_prediction"):
