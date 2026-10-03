@@ -247,78 +247,184 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
     :root {
-        --bg: #F5F9FD;
-        --surface: #EAF2FA;
-        --surface-2: #DCEAF7;
-        --border: #C7DEF2;
-        --border-strong: #A9CBEB;
-        --text: #10151C;
-        --text-muted: #4B5A6B;
-        --text-faint: #8AA0B5;
-        --accent: #1D6FD8;
-        --accent-strong: #1558AE;
-        --accent-soft: rgba(29, 111, 216, 0.10);
+        --bg: #F2F7FD;
+        --surface: #E9F1FA;
+        --surface-2: #FFFFFF;
+        --surface-3: #DEEAF7;
+        --border: #D3E3F4;
+        --border-strong: #AFCFEC;
+        --text: #0F141B;
+        --text-muted: #4A5967;
+        --text-faint: #8299AF;
+        --accent: #1B6FDA;
+        --accent-strong: #14579F;
+        --accent-soft: rgba(27, 111, 218, 0.10);
+        --accent-ring: rgba(27, 111, 218, 0.26);
         --chosen: #15803D;
         --rejected: #C2670C;
         --danger: #C0293D;
-        --radius: 10px;
+        --radius: 12px;
+        --radius-sm: 8px;
+        --shadow-sm: 0 1px 2px rgba(15, 32, 56, 0.06);
+        --shadow-md: 0 4px 14px rgba(15, 32, 56, 0.08);
+        --shadow-lg: 0 12px 32px rgba(15, 32, 56, 0.13);
     }
 
     html, body, [data-testid="stAppViewContainer"], .main { background-color: var(--bg) !important; }
+    /* Sayfa zeminine çok hafif bir ışık gradyanı — düz rengin yüzeysizliğini kırar */
+    [data-testid="stAppViewContainer"] {
+        background-image:
+            radial-gradient(1100px 500px at 12% -8%, rgba(27, 111, 218, 0.07), transparent 60%),
+            radial-gradient(900px 420px at 92% 0%, rgba(21, 128, 61, 0.05), transparent 62%) !important;
+        background-attachment: fixed !important;
+    }
     [data-testid="stHeader"] { background-color: transparent !important; }
     [data-testid="stSidebar"] { background-color: var(--surface) !important; border-right: 1px solid var(--border); }
+
+    /* İnce kaydırma çubuğu */
+    ::-webkit-scrollbar { width: 11px; height: 11px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 3px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+    /* Klavyeyle gezinenler için görünür odak halkası */
+    button:focus-visible, input:focus-visible, textarea:focus-visible, [role="option"]:focus-visible {
+        outline: 2px solid var(--accent) !important; outline-offset: 2px !important;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+    }
 
     * { font-family: 'Inter', sans-serif; }
     h1, h2, h3, h4, h5 { font-family: 'Space Grotesk', sans-serif !important; color: var(--text) !important; letter-spacing: -0.01em; }
     p, span, label, div { color: var(--text); }
     code, .mono { font-family: 'JetBrains Mono', monospace !important; }
 
+    /* Tipografi ölçeği — başlıklar arası hiyerarşiyi netleştirir */
+    h1 { font-size: 2rem !important; font-weight: 700 !important; letter-spacing: -0.025em !important; line-height: 1.18 !important; }
+    h2 { font-size: 1.36rem !important; font-weight: 600 !important; letter-spacing: -0.018em !important; margin-bottom: 0.2rem !important; }
+    h3 { font-size: 1.12rem !important; font-weight: 600 !important; }
+    /* "##### Alt başlık" kullanımları mikro-etikete dönüşür (lab-konsol dili) */
+    h5 {
+        font-size: 0.8rem !important; font-weight: 700 !important;
+        text-transform: uppercase; letter-spacing: 0.09em !important;
+        color: var(--text-muted) !important; margin-bottom: 0.55rem !important;
+    }
+    p { line-height: 1.62; }
+    ::selection { background: rgba(27, 111, 218, 0.22); }
+
+    /* İçerik sütunu — geniş ekranda satırların okunamayacak kadar uzamasını engeller */
+    .main .block-container, [data-testid="stMainBlockContainer"] {
+        max-width: 1200px !important;
+        padding-top: 2.1rem !important; padding-bottom: 3.6rem !important;
+    }
+
+    /* "Deploy" düğmesi gizlenir — uygulama kendi başına bir araç gibi görünsün */
+    [data-testid="stAppDeployButton"] { display: none !important; }
+
     /* Sekme içerik alanlarına hafif nefes payı */
     .stTabs [data-baseweb="tab-panel"] { padding-top: 20px; }
 
     /* Durum rozeti */
-    .status-badge { display: inline-flex; align-items: center; gap: 7px; font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-muted); }
+    .status-badge {
+        display: inline-flex; align-items: center; gap: 7px;
+        font-family: 'JetBrains Mono', monospace; font-size: 12px;
+        padding: 6px 13px; border-radius: 999px;
+        border: 1px solid var(--border-strong); color: var(--text-muted);
+        background: var(--surface-2); box-shadow: var(--shadow-sm);
+    }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
-    .status-dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .status-dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 0 7px var(--accent); }
 
     /* Metric rozetleri */
-    .metric-badge { background-color: var(--accent-soft); color: var(--accent); padding: 6px 14px; border-radius: 999px; font-weight: 600; font-family: 'JetBrains Mono', monospace; font-size: 13px; display: inline-block; border: 1px solid rgba(29, 111, 216, 0.25); }
-    .tag-chosen { color: var(--chosen); border: 1px solid rgba(21, 128, 61, 0.3); background: rgba(21, 128, 61, 0.08); padding: 4px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; }
-    .tag-rejected { color: var(--rejected); border: 1px solid rgba(194, 103, 12, 0.3); background: rgba(194, 103, 12, 0.08); padding: 4px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; }
+    .metric-badge {
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.14), rgba(27, 111, 218, 0.07));
+        color: var(--accent); padding: 7px 15px; border-radius: 999px; font-weight: 600;
+        font-family: 'JetBrains Mono', monospace; font-size: 13px; display: inline-block;
+        border: 1px solid rgba(27, 111, 218, 0.28); box-shadow: var(--shadow-sm);
+    }
+    .tag-chosen {
+        color: var(--chosen); border: 1px solid rgba(21, 128, 61, 0.32);
+        background: linear-gradient(180deg, rgba(21, 128, 61, 0.13), rgba(21, 128, 61, 0.06));
+        padding: 5px 11px; border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; font-weight: 600; box-shadow: var(--shadow-sm);
+    }
+    .tag-rejected {
+        color: var(--rejected); border: 1px solid rgba(194, 103, 12, 0.32);
+        background: linear-gradient(180deg, rgba(194, 103, 12, 0.13), rgba(194, 103, 12, 0.06));
+        padding: 5px 11px; border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; font-weight: 600; box-shadow: var(--shadow-sm);
+    }
 
     /* Olasılık çubukları (signal meter) */
-    .prob-row { display: flex; align-items: center; gap: 12px; margin: 7px 0; }
+    .prob-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
     .prob-label { width: 30%; font-size: 13px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .prob-track { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
-    .prob-fill { height: 100%; border-radius: 4px; background: var(--accent); }
-    .prob-fill.top { background: linear-gradient(90deg, var(--accent-strong), var(--accent)); }
-    .prob-value { width: 52px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); }
+    .prob-track {
+        flex: 1; height: 9px; background: var(--surface-3); border-radius: 999px;
+        overflow: hidden; border: 1px solid var(--border);
+        box-shadow: inset 0 1px 2px rgba(15, 32, 56, 0.06);
+    }
+    .prob-fill {
+        height: 100%; border-radius: 999px; background: var(--accent);
+        transition: width 0.35s cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
+    .prob-fill.top {
+        background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+        box-shadow: 0 0 10px rgba(27, 111, 218, 0.35);
+    }
+    .prob-value { width: 52px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: var(--text); }
 
     /* Streamlit bileşen override'ları */
     .stButton>button, .stDownloadButton>button {
-        border-radius: 7px; font-weight: 600; font-family: 'Inter', sans-serif;
-        border: 1px solid var(--border-strong); transition: all 0.15s ease;
-        background-color: var(--surface-2); color: var(--text);
+        border-radius: var(--radius-sm); font-weight: 600; font-family: 'Inter', sans-serif;
+        border: 1px solid var(--border-strong);
+        transition: transform 0.12s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+        background-color: var(--surface-2); color: var(--text); box-shadow: var(--shadow-sm);
     }
-    .stButton>button:hover, .stDownloadButton>button:hover { border-color: var(--accent); color: var(--accent); }
+    .stButton>button:hover, .stDownloadButton>button:hover {
+        border-color: var(--accent); color: var(--accent);
+        background-color: var(--accent-soft);
+        transform: translateY(-1px); box-shadow: var(--shadow-md);
+    }
+    .stButton>button:active, .stDownloadButton>button:active { transform: translateY(0); box-shadow: var(--shadow-sm); }
     .stButton>button[kind="primary"], .stDownloadButton>button[kind="primary"] {
-        background-color: var(--accent); border-color: var(--accent); color: #FFFFFF;
+        background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+        border-color: var(--accent-strong); color: #FFFFFF;
+        box-shadow: 0 2px 8px rgba(27, 111, 218, 0.28);
     }
     .stButton>button[kind="primary"]:hover, .stDownloadButton>button[kind="primary"]:hover {
-        background-color: var(--accent-strong); color: #FFFFFF;
+        background: linear-gradient(180deg, var(--accent-strong), #11487F);
+        color: #FFFFFF; box-shadow: 0 6px 18px rgba(27, 111, 218, 0.34);
+    }
+    .stButton>button:disabled, .stDownloadButton>button:disabled {
+        opacity: 0.55; box-shadow: none; transform: none;
     }
 
     .stTextInput input, .stTextArea textarea, .stNumberInput input {
-        border-radius: 7px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius-sm) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important; color: var(--text) !important;
         font-family: 'JetBrains Mono', monospace !important; font-size: 13.5px !important;
         -webkit-text-fill-color: var(--text) !important;
+        box-shadow: inset 0 1px 2px rgba(15, 32, 56, 0.05) !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+    }
+    .stTextInput input:hover, .stTextArea textarea:hover, .stNumberInput input:hover { border-color: var(--text-faint) !important; }
+    .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px var(--accent-ring) !important;
     }
     .stTextInput input::placeholder, .stTextArea textarea::placeholder { color: var(--text-faint) !important; opacity: 1 !important; }
 
     .stSelectbox [data-baseweb="select"] > div {
-        border-radius: 7px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius-sm) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important; color: var(--text) !important;
+        box-shadow: var(--shadow-sm) !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+    }
+    .stSelectbox [data-baseweb="select"] > div:hover { border-color: var(--text-faint) !important; }
+    .stSelectbox [data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-ring) !important;
     }
     .stSelectbox [data-baseweb="select"] * { color: var(--text) !important; }
 
@@ -337,27 +443,52 @@ st.markdown(
     .stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid var(--border); }
     .stTabs [data-baseweb="tab"] {
         height: 44px; background-color: transparent; border: 1px solid transparent;
-        border-radius: 7px 7px 0 0; font-family: 'JetBrains Mono', monospace;
+        border-radius: var(--radius-sm) var(--radius-sm) 0 0; font-family: 'JetBrains Mono', monospace;
         font-size: 13px; color: var(--text-muted); padding: 0 18px;
+        transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
     }
+    .stTabs [data-baseweb="tab"]:hover { color: var(--accent); background-color: rgba(27, 111, 218, 0.055); }
     .stTabs [aria-selected="true"] {
-        color: var(--accent) !important; background-color: var(--accent-soft);
+        color: var(--accent) !important;
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.13), rgba(27, 111, 218, 0.04));
         border: 1px solid var(--border); border-bottom: 2px solid var(--accent);
     }
     .stTabs [data-baseweb="tab-highlight"] { background-color: transparent; }
 
+    /* Metrikler — zeminden ayrışan küçük kartlar */
+    [data-testid="stMetric"] {
+        background-color: var(--surface-2); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm);
+        transition: box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    [data-testid="stMetric"]:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
     [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace !important; color: var(--accent) !important; font-size: 1.7rem !important; }
     [data-testid="stMetricLabel"] { color: var(--text-muted) !important; font-size: 12.5px !important; text-transform: uppercase; letter-spacing: 0.04em; }
 
-    .stProgress > div > div > div { background-color: var(--accent) !important; }
-    .stProgress > div > div { background-color: var(--surface-2) !important; }
+    .stProgress > div > div > div { background: linear-gradient(90deg, var(--accent-strong), var(--accent)) !important; border-radius: 999px !important; }
+    .stProgress > div > div { background-color: var(--surface-3) !important; border-radius: 999px !important; }
 
-    [data-testid="stFileUploaderDropzone"] { background-color: var(--surface-2) !important; border: 1px dashed var(--border-strong) !important; border-radius: var(--radius) !important; }
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: var(--surface-2) !important; border: 1px dashed var(--border-strong) !important;
+        border-radius: var(--radius) !important; transition: border-color 0.18s ease, background-color 0.18s ease !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent) !important; background-color: var(--accent-soft) !important; }
+
+    /* st.status / expander yüzeyleri */
+    [data-testid="stExpander"], details {
+        border: 1px solid var(--border) !important; border-radius: var(--radius) !important;
+        background-color: var(--surface-2) !important; box-shadow: var(--shadow-sm) !important;
+    }
+
+    /* Yardımcı metinler (st.caption) */
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: var(--text-muted) !important; }
 
     /* Bildirim kutuları (info/success/warning/error) — Streamlit sürümüne göre 2 farklı isimlendirmeyi de kapsar */
     .stAlert, [data-testid="stAlertContainer"], [data-testid^="stNotification"] {
-        border-radius: 8px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important;
+        box-shadow: var(--shadow-sm) !important;
+        border-left: 3px solid var(--accent) !important;
     }
     .stAlert *, [data-testid="stAlertContainer"] *, [data-testid^="stNotification"] * { color: var(--text) !important; }
     .stAlert [data-testid*="Success"], [data-testid="stAlertContainer"]:has(svg[data-testid*="Success"]) * ,
@@ -369,7 +500,92 @@ st.markdown(
     .stAlert [data-testid*="Info"], [data-testid="stAlertContainer"]:has(svg[data-testid*="Info"]) *,
     [data-testid="stNotificationContentInfo"] { color: var(--accent) !important; }
 
-    hr { border-color: var(--border) !important; }
+    /* Sol vurgu şeridi bildirim türüne göre renklenir */
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Success"]) { border-left-color: var(--chosen) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Warning"]) { border-left-color: var(--rejected) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Error"]) { border-left-color: var(--danger) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Info"]) { border-left-color: var(--accent) !important; }
+
+    hr { border: none !important; height: 1px !important; background: linear-gradient(90deg, var(--border), rgba(211, 227, 244, 0.25)) !important; margin: 1.45rem 0 !important; }
+
+    /* ---------- Bileşen cilası ---------- */
+
+    /* Widget etiketleri — küçük, sakin, tutarlı */
+    [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label, .stSelectbox label, .stTextInput label, .stTextArea label {
+        font-size: 12.5px !important; font-weight: 600 !important;
+        color: var(--text-muted) !important; letter-spacing: 0.01em !important;
+        line-height: 1.5 !important;
+    }
+
+    /* Çalışma modu seçimi — segment düğmeleri hissi */
+    [data-testid="stRadio"] [role="radiogroup"] { gap: 8px; flex-wrap: wrap; }
+    [data-testid="stRadio"] [role="radiogroup"] > label {
+        background: var(--surface-2); border: 1px solid var(--border-strong);
+        border-radius: 999px; padding: 7px 15px; margin: 0;
+        box-shadow: var(--shadow-sm);
+        transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:hover {
+        border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px);
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {
+        border-color: var(--accent);
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.13), rgba(27, 111, 218, 0.05));
+        box-shadow: 0 0 0 3px var(--accent-ring);
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) p { color: var(--accent) !important; font-weight: 600 !important; }
+
+    /* Metin alanı — uzun cümleleri rahat okuyup düzenlemek için */
+    .stTextArea textarea {
+        line-height: 1.66 !important; padding: 12px 14px !important;
+        caret-color: var(--accent) !important; resize: vertical !important;
+    }
+    .stTextInput input, .stNumberInput input { padding: 10px 13px !important; }
+
+    /* Düğme ölçüsü — satır içi düğmeler aynı yükseklikte hizalanır */
+    .stButton>button, .stDownloadButton>button {
+        min-height: 42px; font-size: 13.5px; letter-spacing: 0.005em; padding: 0 16px;
+    }
+
+    /* Açılır liste seçenekleri — dokunma hedefi ve ayrışma */
+    div[role="listbox"], div[data-baseweb="popover"] ul { padding: 6px !important; }
+    div[data-baseweb="popover"] li, div[role="listbox"] li, ul[role="listbox"] li, div[data-baseweb="popover"] [role="option"] {
+        padding: 9px 12px !important; border-radius: var(--radius-sm) !important;
+        font-size: 13.5px !important; transition: background-color 0.14s ease, color 0.14s ease !important;
+    }
+
+    /* Sayısal girdi artır/azalt düğmeleri */
+    [data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] {
+        background-color: var(--surface-3) !important; border-color: var(--border-strong) !important;
+        color: var(--text-muted) !important;
+    }
+    [data-testid="stNumberInputStepUp"]:hover, [data-testid="stNumberInputStepDown"]:hover {
+        background-color: var(--accent-soft) !important; color: var(--accent) !important;
+    }
+
+    /* Yardım baloncukları */
+    [data-baseweb="tooltip"] {
+        background: #121922 !important; border-radius: var(--radius-sm) !important;
+        font-size: 12.5px !important; line-height: 1.5 !important;
+        box-shadow: var(--shadow-lg) !important; border: none !important;
+    }
+    [data-baseweb="tooltip"] * { color: #F2F7FD !important; }
+
+    /* Satır içi kod parçaları (dosya yolu/isim gösterimleri) */
+    code {
+        background: var(--surface-3) !important; border: 1px solid var(--border) !important;
+        border-radius: 6px !important; padding: 2px 6px !important;
+        font-size: 12.5px !important; color: var(--accent-strong) !important;
+    }
+
+    /* Yükleniyor göstergesi */
+    .stSpinner > div, [data-testid="stSpinner"] > div { border-top-color: var(--accent) !important; }
+
+    /* Sütunlar dar ekranda sıkışmasın */
+    @media (max-width: 720px) {
+        .main .block-container, [data-testid="stMainBlockContainer"] { padding-left: 1rem !important; padding-right: 1rem !important; }
+        .prob-label { width: 42%; }
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -1187,14 +1403,19 @@ with tab4:
 
                 st.markdown("---")
 
-                # CHOSEN seçimi: varsayılan olarak BOŞ gelir — kullanıcı cümleyi okuyup bilinçli
-                # seçim yapmadan kaydederse chosen/rejected'ın ters yazılmasını önler. Key, üretim
-                # sayacına bağlı olduğu için yeni bir cümle geldiğinde seçim otomatik sıfırlanır.
+                # CHOSEN seçimi: Eğer yukarıda belirli bir hedef kategori seçilmişse onu varsayılan yap
+                default_idx = 0
+                if secilen_hedef_kategori != "Rastgele (Otomatik)" and secilen_hedef_kategori in st.session_state.classes:
+                    default_idx = list(st.session_state.classes).index(secilen_hedef_kategori)
+                elif st.session_state.bert_prediction in st.session_state.classes:
+                    default_idx = list(st.session_state.classes).index(
+                        st.session_state.bert_prediction
+                    )
+
                 gercek_dogru_kategori = st.selectbox(
                     "Nihai karar — gerçekte olması gereken CHOSEN kategori:",
                     st.session_state.classes,
-                    index=None,
-                    placeholder="Cümleyi okuyup doğru sınıfı seçin…",
+                    index=default_idx,
                     key=f"nihai_karar_{st.session_state.get('uretim_sayaci', 0)}",
                 )
 
