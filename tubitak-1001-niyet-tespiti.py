@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -50,6 +51,163 @@ if "dpo_dataset_buffer" not in st.session_state:
 
 # DPO verilerinin diske yazılacağı sabit dosya yolu
 DPO_OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dpo_dataset.jsonl")
+
+# ------------------------------------------------------------------
+# DPO ÜRETİM PARAMETRELERİ — Gemini'ye gidecek talimatın kalitesini
+# artırmak için sınıf tanımları, çeşitlilik ve yasak kelime listeleri.
+# ------------------------------------------------------------------
+
+# Her sınıfın kısa tanımı + örnekleri + karıştırılmaması gereken sınıfla farkı.
+# Gemini talimatına hem hedef sınıfın TAM tanımı hem de çeldirici sınıfın
+# KISA tanımı eklenir ki model "asıl istek" ile "çeldirici" ayrımını net görsün.
+SINIF_TANIMLARI = {
+    "Bilgi_Karti": {
+        "tanim": "Öğrenci konuyu tekrar/ezber için AYRI AYRI KARTLAR (flashcard, soru-cevap kartı, ön yüz/arka yüz) istiyor. Not: 'soru-cevap kartı' Bilgi_Karti'dır, Kavramsal_Soru değil.",
+        "ornekler": [
+            "Enzimlerin işleyişini kart destesine dökebilir misin?",
+            "hal değişimi grafikleri aklımda hiç kalmıyor, birkaç tekrar kartı çıkarsana",
+            "endositoz ekzositoz kartı",
+        ],
+        "fark": "Anahtar_Kavram_Ozet tek parça toplu metin ister; kart ayrı ayrı tekrar birimleri ister.",
+    },
+    "Anahtar_Kavram_Ozet": {
+        "tanim": "Konunun ÖZETİNİ, ana hatlarını, önemli kavramlarını toplu/madde madde istiyor.",
+        "ornekler": [
+            "Aristoteles'in mantıktaki kavram ve terim anlayışını özetle.",
+            "moğol istilası konusu zihnimde dağınık kaldı, kısa toparlama lazım",
+            "nüfus piramidi özeti",
+        ],
+        "fark": "Bilgi_Karti ayrı tekrar kartları ister; bu sınıf tek parça toplu özet ister.",
+    },
+    "Kavramsal_Soru": {
+        "tanim": "Öğrenci KENDİSİNE anlayışını ölçen/düşündüren (tek) bir soru SORULMASINI istiyor (öğrencinin kendisinin soru sorması değil).",
+        "ornekler": [
+            "osmozu çalıştım, beni düşündürecek bi soru sorsana",
+            "Şiir bilgisiyle ilgili kısa bir quiz sorusu at.",
+            "türkiyedeki su kaynaklarını öğrendim, bilgimi merak ediyorum, dener misin",
+        ],
+        "fark": "Uyarlanabilir_Soru'da zorluk cevaplara göre ayarlanır; burada ayarlama yok.",
+    },
+    "Uyarlanabilir_Soru": {
+        "tanim": "Kendisine sorular sorulmasını ve ZORLUĞUN cevaplarına/seviyesine göre AYARLANMASINI istiyor (kolaydan zora, bildikçe zorlaştır, takılırsam kolaylaştır).",
+        "ornekler": [
+            "hinduizmden sor, ilerledikçe zorlaştır",
+            "asit baz tepkimelerinde takılırsam basit bir soruya dönülsün, rahatladıkça zorluk artsın.",
+            "hocam stresin nedenlerinden sor, seviyemi ölçüp ona göre sor",
+        ],
+        "fark": "Kavramsal_Soru'da tek soru sorulur, zorluk ayarlaması yoktur.",
+    },
+    "Yanlis_Cevap_Aciklama": {
+        "tanim": "Daha önce çözdüğü bir soruda YANLIŞ yaptığını söylüyor ve hatasının nerede/neden olduğunu soruyor.",
+        "ornekler": [
+            "Pisagor sorusunda cevabım 13 çıktı ama doğrusu 12'ymiş, nerede hata yaptığımı gösterir misin?",
+            "suffix hatam nerede",
+            "katı sıvı ile ilgili soruda bir özelliği ters yazmışım, kafam karıştı bu soruda",
+        ],
+        "fark": "Diğer sınıflarda öğrenci henüz bir soru çözmüş/yanlış yapmış olduğunu belirtmez.",
+    },
+    "Kapsam_Disi": {
+        "tanim": "Selamlaşma, teşekkür, veda, sohbet, duygu/motivasyon, güncel olay/spor/film, uygulama hakkında soru, anlamsız metin — yukarıdaki 5 eğitim talebinden hiçbiri değil. Ders konusunun ADI geçse bile istek bu 5 talepten biri değilse (konunun tarihi, kitap/belgesel önerisi, kariyer, 'ne işime yarayacak', arkadaşa nasıl anlatırım) Kapsam_Disi'dır.",
+        "ornekler": [
+            "Selamünaleyküm, nasılsınız hocalarım?",
+            "Türev çalışmaktan çok sıkıldım, bu hafta sonu ne izlesem?",
+            "asdasd",
+        ],
+        "fark": "Diğer 5 sınıf her zaman somut bir ders/eğitim talebi içerir; bu sınıf içermez.",
+    },
+}
+
+# Yasaklı ifadeler — toplanan verideki kalıplaşmış, aşırı tekrarlanan kelime/ifadeler.
+# Kelime sınırlı (örn. "hap" "hapis" içinde eşleşmez) ve büyük/küçük harf duyarsız aranır.
+YASAKLI_IFADELER = [
+    "hap bilgi",
+    "hap",
+    "can alıcı",
+    "yarınki deneme sınavı",
+    "uzun uzadıya konu anlatımı",
+]
+
+# Normal kategori üretiminde rastgele seçilecek üslup çeşitleri
+URETIM_USLUPLARI = [
+    "Resmi ve saygılı bir dille yaz.",
+    "Günlük, samimi bir sohbet diliyle yaz.",
+    "'Hocam' diye hitap eden, samimi bir ton kullan.",
+    "Yazım hataları olan, Türkçe karaktersiz (ı,ş,ğ,ç,ö,ü yerine i,s,g,c,o,u kullanan) bir öğrenci diliyle yaz.",
+    "Çok kısa ve kesik cümlelerle yaz.",
+    "Önce kısa bir bağlam/durum anlat, sonra isteği belirt.",
+]
+
+# "Aşırı Zorlayıcı" modunda kullanılacak çeldirici teknikleri
+CELDIRICI_TEKNIKLERI = [
+    "Başka bir sınıfın imza kelimesini olumsuzlayarak başla (örn. 'özet istemiyorum, ...'), sonra asıl isteği belirt.",
+    "'{celdirici} yerine {hedef}' kalıbıyla asıl isteği netleştir.",
+    "Geçmiş bir olay anlatarak başla (örn. 'dün ... yanlış yaptım ama ...'), sonra asıl isteğe geç.",
+    "Asıl isteği bir sohbetin/durumun içine gömerek ilet.",
+    "Hedef sınıfın imza kelimesini (örn. 'kart', 'özet' gibi) hiç kullanmadan, dolaylı biçimde iste.",
+]
+
+# Kapsam_Dışı "excel" modunda kullanılacak sabit kapsam dışı talepler
+# (mevcut 10 madde + çeşitlilik için eklenen yeni maddeler)
+KAPSAM_DISI_TALEPLERI = [
+    "bu konuyu arkadaşıma nasıl anlatabilirim",
+    "bu konuyla ilgili kitap önerir misin",
+    "bu konuyu kimler icat etmiş",
+    "bu konunun tarihi nedir",
+    "bu konuyla ilgili film veya belgesel var mı",
+    "bu konuyu öğrenmenin ne faydası var",
+    "bu konuyu sevmiyorum ne yapmalıyım",
+    "bu konuyla ilgili yarışmalar var mı",
+    "bu konuyu gelecekte kullanacak mıyım",
+    "bu konuda kariyer yapabilir miyim",
+    "bu konuyu anlattığınız için teşekkür ederim, iyi günler",
+    "bu konudan nefret ediyorum, çok sıkıcı geliyor diye şikayet ediyorum",
+    "bu uygulamayı nasıl kullanacağımı soruyorum",
+    "sınavda bu konudan kaç soru çıkar diye tahmin istiyorum",
+    "bu konuyu çalışırken müzik dinlesem mi diye tavsiye istiyorum",
+    "bu konuyla ilgili önerebileceğin bir YouTube kanalı var mı diye soruyorum",
+]
+
+
+def _sinif_kisa_tanim(sinif_adi):
+    """Bir sınıfın SINIF_TANIMLARI içindeki kısa tanımını döndürür (bulunamazsa sınıf adını)."""
+    bilgi = SINIF_TANIMLARI.get(sinif_adi)
+    return bilgi["tanim"] if bilgi else sinif_adi
+
+
+def _hedef_tanimini_formatla(hedef_niyet):
+    """Hedef sınıfın TAM tanımını (tanım + örnekler + fark) talimat metni olarak döndürür."""
+    bilgi = SINIF_TANIMLARI.get(hedef_niyet)
+    if not bilgi:
+        return f"HEDEF NİYET: '{hedef_niyet}' kategorisine ait bir talep yaz."
+    ornekler_metni = "\n".join(f"  - \"{orn}\"" for orn in bilgi["ornekler"])
+    return (
+        f"HEDEF NİYET TANIMI — {hedef_niyet}:\n"
+        f"{bilgi['tanim']}\n"
+        f"Örnekler:\n{ornekler_metni}\n"
+        f"Karıştırılmaması gereken fark: {bilgi['fark']}"
+    )
+
+
+def _celdirici_sinifi_formatla(celdirici_sinif):
+    """Çeldirici sınıfın KISA tanımını talimat metni olarak döndürür."""
+    return f"ÇELDİRİCİ SINIF (yalnızca yan unsur olarak kullan) — {celdirici_sinif}:\n{_sinif_kisa_tanim(celdirici_sinif)}"
+
+
+def _yasakli_ifade_var_mi(metin):
+    """Metinde YASAKLI_IFADELER listesindeki bir ifade kelime sınırlı olarak geçiyor mu kontrol eder."""
+    for ifade in YASAKLI_IFADELER:
+        kalip = r"(?<!\w)" + re.escape(ifade) + r"(?!\w)"
+        if re.search(kalip, metin, re.IGNORECASE):
+            return True
+    return False
+
+
+def _gemini_ciktisini_temizle(metin):
+    """Gemini'den gelen metindeki baştaki/sondaki tırnak işaretlerini ve 'Öğrenci:' gibi önekleri temizler."""
+    metin = metin.strip()
+    metin = metin.strip("\"'“”‘’`")
+    metin = re.sub(r"^(öğrenci|ogrenci|student)\s*[:：]\s*", "", metin, flags=re.IGNORECASE)
+    return metin.strip()
 
 # ------------------------------------------------------------------
 # TASARIM SİSTEMİ — "Lab Console" tema
@@ -744,13 +902,11 @@ with tab4:
                     else:
                         hedef_niyet = secilen_hedef_kategori
 
-                    if "Aşırı Zorlayıcı" in secilen_zorluk:
-                        stil_talimati = f"NİYETİN: '{hedef_niyet}' kategorisine ait olmak. Ancak cümlede başka niyetlerin kelimelerini çeldirici olarak kullanarak modeli şaşırt ve zorla."
-                    else:
-                        stil_talimati = f"'{hedef_niyet}' kategorisine uygun doğal bir talep ilet."
+                    # Her çağrıda rastgele çeşitlilik: üslup (normal kategori üretiminde kullanılır)
+                    secilen_uslup = random.choice(URETIM_USLUPLARI)
 
                     if "Kısa" in secilen_uzunluk:
-                        uzunluk_talimati = "Cümle tek parça, kısa ve öz olsun."
+                        uzunluk_talimati = "Cümle tek parça, kısa ve öz olsun (3-10 kelime arası)."
                     elif "Uzun" in secilen_uzunluk:
                         uzunluk_talimati = "Cümle detaylı, bağlam içeren uzun bir cümle olsun."
                     else:
@@ -769,25 +925,15 @@ with tab4:
                     if hedef_kapsam_disi and kapsam_disi_mod == "excel":
                         # Mod 1: Excel'deki ders konusunu kullan ama kapsam dışı talep yaz
                         # Örn: Matematik konusunda ama "bunu arkadaşıma nasıl anlatabilirim?"
-                        kapsam_disi_talepler = [
-                            "bu konuyu arkadaşıma nasıl anlatabilirim",
-                            "bu konuyla ilgili kitap önerir misin",
-                            "bu konuyu kimler icat etmiş",
-                            "bu konunun tarihi nedir",
-                            "bu konuyla ilgili film veya belgesel var mı",
-                            "bu konuyu öğrenmenin ne faydası var",
-                            "bu konuyu sevmiyorum ne yapmalıyım",
-                            "bu konuyla ilgili yarışmalar var mı",
-                            "bu konuyu gelecekte kullanacak mıyım",
-                            "bu konuda kariyer yapabilir miyim",
-                        ]
-                        secilen_talep = random.choice(kapsam_disi_talepler)
+                        secilen_talep = random.choice(KAPSAM_DISI_TALEPLERI)
                         prompt_to_gemini = (
                             f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
                             f"Sistem yalnızca şu kategorilerdeki istekleri işliyor: {', '.join(_siniflar[:6])} vb.\n"
                             f"GÖREV: '{secilen_konu}' konusundan bahseden ama sisteme uygun bir DERS TALEBİ (soru sorma, "
                             f"alıştırma isteme, açıklama isteme vb.) olmayan, bunun yerine '{secilen_talep}' "
-                            f"şeklinde bir mesaj yaz. Bu mesaj sisteme kapsam dışı görünmeli.\n"
+                            f"şeklinde bir mesaj yaz. Bu mesaj sisteme kapsam dışı görünmeli. Diğer sınıfların kelimeleri "
+                            f"(örn. 'özetin çok işime yaradı, teşekkürler' gibi) çeldirici/yan unsur olarak geçebilir.\n"
+                            f"ÜSLUP: {secilen_uslup}\n"
                             f"UZUNLUK: {uzunluk_talimati}\n"
                             f"KURAL: Sadece öğrencinin kuracağı TEK BİR doğal cümle ver. Kategori adını yazma."
                         )
@@ -815,6 +961,7 @@ with tab4:
                             f"Bu sistem yalnızca ders/eğitim sorularını yanıtlamak için tasarlanmış.\n"
                             f"GÖREV: Eğitimle, okulla, derslerle veya akademik konularla HİÇBİR İLGİSİ OLMAYAN, "
                             f"tamamen alakasız ve konu dışı bir mesaj yaz. Tema: {kapsam_disi_tema}\n"
+                            f"ÜSLUP: {secilen_uslup} Kısa ve doğal sohbet cümleleri de olabilir.\n"
                             f"UZUNLUK: {uzunluk_talimati}\n"
                             f"KURAL: Mesajda ders, ödev, konu, formül, öğretmen, okul gibi eğitimle ilgili hiçbir "
                             f"kelime KULLANMA. Sadece sıradan bir kullanıcının kuracağı TEK BİR cümle ver."
@@ -823,17 +970,61 @@ with tab4:
 
                     else:
                         # Normal niyet kategorisi
-                        prompt_to_gemini = (
-                            f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n"
-                            f"GÖREV: {stil_talimati}\n"
-                            f"UZUNLUK: {uzunluk_talimati}\n"
-                            f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                        hedef_tanim_metni = _hedef_tanimini_formatla(hedef_niyet)
+                        yasakli_ifadeler_metni = ", ".join(f'"{ifade}"' for ifade in YASAKLI_IFADELER)
+                        uretilmeyecek_tur_metni = (
+                            "ÜRETME: Öğrencinin konu hakkında açıklama/bilgi istediği cümleler "
+                            "(\"bana X'i anlat\", \"...nasıl oldu merak ediyorum\") ÜRETME — bu tür istekler "
+                            "bu görevin kapsamında değil."
                         )
 
-                    response = client.models.generate_content(
-                        model=gemini_model_secimi, contents=prompt_to_gemini
-                    )
-                    generated_text = response.text.strip()
+                        if "Aşırı Zorlayıcı" in secilen_zorluk:
+                            # Hedef dışındaki sınıflardan rastgele bir çeldirici sınıf seç
+                            diger_siniflar = [s for s in _siniflar if s != hedef_niyet]
+                            celdirici_sinif = random.choice(diger_siniflar) if diger_siniflar else hedef_niyet
+                            celdirici_tanim_metni = _celdirici_sinifi_formatla(celdirici_sinif)
+                            celdirici_teknik = random.choice(CELDIRICI_TEKNIKLERI).format(
+                                celdirici=celdirici_sinif, hedef=hedef_niyet
+                            )
+                            gorev_metni = (
+                                f"GÖREV: Cümlenin ASIL isteği {hedef_niyet} olmalı. Yanıtta {celdirici_sinif} sınıfının "
+                                f"kelimeleri yalnızca YAN UNSUR olarak geçebilir (olumsuzlanmış, reddedilmiş, geçmişte "
+                                f"kalmış veya ertelenmiş bir istek olarak). İki isteği EŞİT AĞIRLIKTA birleştirme.\n"
+                                f"ÇELDİRİCİ TEKNİK: {celdirici_teknik}"
+                            )
+                            prompt_to_gemini = (
+                                f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n\n"
+                                f"{hedef_tanim_metni}\n\n"
+                                f"{celdirici_tanim_metni}\n\n"
+                                f"{gorev_metni}\n"
+                                f"ÜSLUP: {secilen_uslup}\n"
+                                f"UZUNLUK: {uzunluk_talimati}\n"
+                                f"YASAKLI İFADELER: Şu kelime/ifadeleri KULLANMA: {yasakli_ifadeler_metni}.\n"
+                                f"{uretilmeyecek_tur_metni}\n"
+                                f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                            )
+                        else:
+                            prompt_to_gemini = (
+                                f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n\n"
+                                f"{hedef_tanim_metni}\n\n"
+                                f"GÖREV: '{hedef_niyet}' kategorisine uygun doğal bir talep ilet.\n"
+                                f"ÜSLUP: {secilen_uslup}\n"
+                                f"UZUNLUK: {uzunluk_talimati}\n"
+                                f"YASAKLI İFADELER: Şu kelime/ifadeleri KULLANMA: {yasakli_ifadeler_metni}.\n"
+                                f"{uretilmeyecek_tur_metni}\n"
+                                f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                            )
+
+                    # Gemini çağrısı — yasaklı ifade geçerse bir kez yeniden üret
+                    generated_text = ""
+                    for _deneme in range(2):
+                        response = client.models.generate_content(
+                            model=gemini_model_secimi, contents=prompt_to_gemini
+                        )
+                        generated_text = _gemini_ciktisini_temizle(response.text)
+                        if not _yasakli_ifade_var_mi(generated_text):
+                            break
+
                     st.session_state.generated_test_text = generated_text
 
                     tahmin, sirali_probs = modelle_tahmin_et(generated_text)
