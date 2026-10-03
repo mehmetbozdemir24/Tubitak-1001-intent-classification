@@ -48,6 +48,10 @@ if "classes" not in st.session_state:
     st.session_state.classes = None
 if "dpo_dataset_buffer" not in st.session_state:
     st.session_state.dpo_dataset_buffer = []
+if "uretim_sayaci" not in st.session_state:
+    # "Nihai karar" selectbox'ının key'ine bağlanır; her yeni cümlede artırılarak
+    # önceki seçimin yeni cümleye taşınmasını (ve yanlış chosen/rejected kaydını) önler.
+    st.session_state.uretim_sayaci = 0
 
 # DPO verilerinin diske yazılacağı sabit dosya yolu
 DPO_OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dpo_dataset.jsonl")
@@ -200,6 +204,12 @@ def _yasakli_ifade_var_mi(metin):
         if re.search(kalip, metin, re.IGNORECASE):
             return True
     return False
+
+
+def _uretim_sayacini_artir():
+    """Ekranda gösterilen cümle değiştiğinde çağrılır; 'Nihai karar' selectbox'ının
+    key'i buna bağlı olduğu için seçim otomatik olarak boşa döner."""
+    st.session_state.uretim_sayaci = st.session_state.get("uretim_sayaci", 0) + 1
 
 
 def _gemini_ciktisini_temizle(metin):
@@ -1030,6 +1040,7 @@ with tab4:
                     tahmin, sirali_probs = modelle_tahmin_et(generated_text)
                     st.session_state.bert_prediction = tahmin
                     st.session_state.bert_probabilities = sirali_probs
+                    _uretim_sayacini_artir()
                     return True
 
                 except Exception as e:
@@ -1075,6 +1086,7 @@ with tab4:
                         tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
                         st.session_state.bert_prediction = tahmin
                         st.session_state.bert_probabilities = sirali_probs
+                        _uretim_sayacini_artir()
                         st.rerun()
                     else:
                         st.warning("Lütfen tahmin için bir metin girin.")
@@ -1106,6 +1118,7 @@ with tab4:
                             tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
                             st.session_state.bert_prediction = tahmin
                             st.session_state.bert_probabilities = sirali_probs
+                            _uretim_sayacini_artir()
                             st.rerun()
                         else:
                             st.warning("Lütfen tahmin için bir metin girin.")
@@ -1150,19 +1163,15 @@ with tab4:
 
                 st.markdown("---")
 
-                # CHOSEN seçimi: Eğer yukarıda belirli bir hedef kategori seçilmişse onu varsayılan yap
-                default_idx = 0
-                if secilen_hedef_kategori != "Rastgele (Otomatik)" and secilen_hedef_kategori in st.session_state.classes:
-                    default_idx = list(st.session_state.classes).index(secilen_hedef_kategori)
-                elif st.session_state.bert_prediction in st.session_state.classes:
-                    default_idx = list(st.session_state.classes).index(
-                        st.session_state.bert_prediction
-                    )
-
+                # CHOSEN seçimi: varsayılan olarak BOŞ gelir — kullanıcı cümleyi okuyup bilinçli
+                # seçim yapmadan kaydederse chosen/rejected'ın ters yazılmasını önler. Key, üretim
+                # sayacına bağlı olduğu için yeni bir cümle geldiğinde seçim otomatik sıfırlanır.
                 gercek_dogru_kategori = st.selectbox(
                     "Nihai karar — gerçekte olması gereken CHOSEN kategori:",
                     st.session_state.classes,
-                    index=default_idx,
+                    index=None,
+                    placeholder="Cümleyi okuyup doğru sınıfı seçin…",
+                    key=f"nihai_karar_{st.session_state.get('uretim_sayaci', 0)}",
                 )
 
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1175,6 +1184,8 @@ with tab4:
                     aktif_metin = guncel_soru.strip()
                     if not aktif_metin:
                         st.error("Metin kutusu boş olamaz.")
+                    elif gercek_dogru_kategori is None:
+                        st.error("Lütfen 'Nihai karar' kutusundan doğru kategoriyi seçin.")
                     else:
                         aktif_tahmin, _ = modelle_tahmin_et(aktif_metin)
                         if aktif_tahmin == gercek_dogru_kategori:
@@ -1215,6 +1226,7 @@ with tab4:
                                     st.session_state.generated_test_text = ""
                                     st.session_state.bert_prediction = None
                                     st.session_state.bert_probabilities = []
+                                    _uretim_sayacini_artir()
                                 status.update(
                                     label="Hazır.", state="complete", expanded=False
                                 )
@@ -1234,6 +1246,7 @@ with tab4:
                             st.session_state.generated_test_text = ""
                             st.session_state.bert_prediction = None
                             st.session_state.bert_probabilities = []
+                            _uretim_sayacini_artir()
                         status.update(label="Hazır.", state="complete", expanded=False)
                     st.rerun()
 
