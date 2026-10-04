@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -47,9 +48,193 @@ if "classes" not in st.session_state:
     st.session_state.classes = None
 if "dpo_dataset_buffer" not in st.session_state:
     st.session_state.dpo_dataset_buffer = []
+if "uretim_sayaci" not in st.session_state:
+    # "Nihai karar" selectbox'ının key'ine bağlanır; her yeni cümlede artırılarak
+    # önceki seçimin yeni cümleye taşınmasını (ve yanlış chosen/rejected kaydını) önler.
+    st.session_state.uretim_sayaci = 0
 
 # DPO verilerinin diske yazılacağı sabit dosya yolu
 DPO_OUTPUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dpo_dataset.jsonl")
+
+# ------------------------------------------------------------------
+# DPO ÜRETİM PARAMETRELERİ — Gemini'ye gidecek talimatın kalitesini
+# artırmak için sınıf tanımları, çeşitlilik ve yasak kelime listeleri.
+# ------------------------------------------------------------------
+
+# Her sınıfın kısa tanımı + örnekleri + karıştırılmaması gereken sınıfla farkı.
+# Gemini talimatına hem hedef sınıfın TAM tanımı hem de çeldirici sınıfın
+# KISA tanımı eklenir ki model "asıl istek" ile "çeldirici" ayrımını net görsün.
+SINIF_TANIMLARI = {
+    "Bilgi_Karti": {
+        "tanim": "Öğrenci konuyu tekrar/ezber için AYRI AYRI KARTLAR (flashcard, soru-cevap kartı, ön yüz/arka yüz) istiyor. Not: 'soru-cevap kartı' Bilgi_Karti'dır, Kavramsal_Soru değil.",
+        "ornekler": [
+            "Enzimlerin işleyişini kart destesine dökebilir misin?",
+            "hal değişimi grafikleri aklımda hiç kalmıyor, birkaç tekrar kartı çıkarsana",
+            "endositoz ekzositoz kartı",
+        ],
+        "fark": "Anahtar_Kavram_Ozet tek parça toplu metin ister; kart ayrı ayrı tekrar birimleri ister.",
+    },
+    "Anahtar_Kavram_Ozet": {
+        "tanim": "Konunun ÖZETİNİ, ana hatlarını, önemli kavramlarını toplu/madde madde istiyor.",
+        "ornekler": [
+            "Aristoteles'in mantıktaki kavram ve terim anlayışını özetle.",
+            "moğol istilası konusu zihnimde dağınık kaldı, kısa toparlama lazım",
+            "nüfus piramidi özeti",
+        ],
+        "fark": "Bilgi_Karti ayrı tekrar kartları ister; bu sınıf tek parça toplu özet ister.",
+    },
+    "Kavramsal_Soru": {
+        "tanim": "Öğrenci KENDİSİNE anlayışını ölçen/düşündüren (tek) bir soru SORULMASINI istiyor (öğrencinin kendisinin soru sorması değil).",
+        "ornekler": [
+            "osmozu çalıştım, beni düşündürecek bi soru sorsana",
+            "Şiir bilgisiyle ilgili kısa bir quiz sorusu at.",
+            "türkiyedeki su kaynaklarını öğrendim, bilgimi merak ediyorum, dener misin",
+        ],
+        "fark": "Uyarlanabilir_Soru'da zorluk cevaplara göre ayarlanır; burada ayarlama yok.",
+    },
+    "Uyarlanabilir_Soru": {
+        "tanim": "Kendisine sorular sorulmasını ve ZORLUĞUN cevaplarına/seviyesine göre AYARLANMASINI istiyor (kolaydan zora, bildikçe zorlaştır, takılırsam kolaylaştır).",
+        "ornekler": [
+            "hinduizmden sor, ilerledikçe zorlaştır",
+            "asit baz tepkimelerinde takılırsam basit bir soruya dönülsün, rahatladıkça zorluk artsın.",
+            "hocam stresin nedenlerinden sor, seviyemi ölçüp ona göre sor",
+        ],
+        "fark": "Kavramsal_Soru'da tek soru sorulur, zorluk ayarlaması yoktur.",
+    },
+    "Yanlis_Cevap_Aciklama": {
+        "tanim": "Daha önce çözdüğü bir soruda YANLIŞ yaptığını söylüyor ve hatasının nerede/neden olduğunu soruyor.",
+        "ornekler": [
+            "Pisagor sorusunda cevabım 13 çıktı ama doğrusu 12'ymiş, nerede hata yaptığımı gösterir misin?",
+            "suffix hatam nerede",
+            "katı sıvı ile ilgili soruda bir özelliği ters yazmışım, kafam karıştı bu soruda",
+        ],
+        "fark": "Diğer sınıflarda öğrenci henüz bir soru çözmüş/yanlış yapmış olduğunu belirtmez.",
+    },
+    "Kapsam_Disi": {
+        "tanim": "Selamlaşma, teşekkür, veda, sohbet, duygu/motivasyon, güncel olay/spor/film, uygulama hakkında soru, anlamsız metin — yukarıdaki 5 eğitim talebinden hiçbiri değil. Ders konusunun ADI geçse bile istek bu 5 talepten biri değilse (konunun tarihi, kitap/belgesel önerisi, kariyer, 'ne işime yarayacak', arkadaşa nasıl anlatırım) Kapsam_Disi'dır.",
+        "ornekler": [
+            "Selamünaleyküm, nasılsınız hocalarım?",
+            "Türev çalışmaktan çok sıkıldım, bu hafta sonu ne izlesem?",
+            "asdasd",
+        ],
+        "fark": "Diğer 5 sınıf her zaman somut bir ders/eğitim talebi içerir; bu sınıf içermez.",
+    },
+}
+
+# Yasaklı ifadeler — toplanan verideki kalıplaşmış, aşırı tekrarlanan kelime/ifadeler.
+# Kelime sınırlı (örn. "hap" "hapis" içinde eşleşmez) ve büyük/küçük harf duyarsız aranır.
+YASAKLI_IFADELER = [
+    "hap bilgi",
+    "hap",
+    "can alıcı",
+    "yarınki deneme sınavı",
+    "uzun uzadıya konu anlatımı",
+]
+
+# Normal kategori üretiminde rastgele seçilecek üslup çeşitleri
+URETIM_USLUPLARI = [
+    "Resmi ve saygılı bir dille yaz.",
+    "Günlük, samimi bir sohbet diliyle yaz.",
+    "'Hocam' diye hitap eden, samimi bir ton kullan.",
+    "Yazım hataları olan, Türkçe karaktersiz (ı,ş,ğ,ç,ö,ü yerine i,s,g,c,o,u kullanan) bir öğrenci diliyle yaz.",
+    "Çok kısa ve kesik cümlelerle yaz.",
+    "Önce kısa bir bağlam/durum anlat, sonra isteği belirt.",
+]
+
+# Sınıfların doğal dil karşılıkları — talimatta sınıf ADI yerine bunlar kullanılır,
+# böylece Gemini'ye teknik etiket değil öğrencinin gerçekte kuracağı istek aktarılır.
+SINIF_DOGAL_ADLARI = {
+    "Bilgi_Karti": "bilgi kartı / flashcard",
+    "Anahtar_Kavram_Ozet": "özet",
+    "Kavramsal_Soru": "bana düşündürücü bir soru sorulması",
+    "Uyarlanabilir_Soru": "seviyeme göre zorlaşan sorular",
+    "Yanlis_Cevap_Aciklama": "yanlış cevabımın açıklanması",
+    "Kapsam_Disi": "ders dışı sohbet",
+}
+
+# "Aşırı Zorlayıcı" modunda kullanılacak çeldirici teknikleri
+# Şablonlardaki {celdirici_dogal} / {hedef_dogal} alanları SINIF_DOGAL_ADLARI'ndan doldurulur.
+CELDIRICI_TEKNIKLERI = [
+    "Çeldirici isteği olumsuzlayarak başla (örn. '{celdirici_dogal} istemiyorum, ...'), sonra asıl isteği belirt.",
+    "'{celdirici_dogal} yerine {hedef_dogal}' kalıbıyla asıl isteği netleştir.",
+    "Geçmiş bir olay anlatarak başla (örn. 'dün ... yanlış yaptım ama ...'), sonra asıl isteğe geç.",
+    "Asıl isteği bir sohbetin/durumun içine gömerek ilet.",
+    "Asıl isteğin imza kelimesini ('{hedef_dogal}' ifadesini) hiç kullanmadan, dolaylı biçimde iste.",
+]
+
+# Kapsam_Dışı "excel" modunda kullanılacak sabit kapsam dışı talepler
+# (mevcut 10 madde + çeşitlilik için eklenen yeni maddeler)
+KAPSAM_DISI_TALEPLERI = [
+    "bu konuyu arkadaşıma nasıl anlatabilirim",
+    "bu konuyla ilgili kitap önerir misin",
+    "bu konuyu kimler icat etmiş",
+    "bu konunun tarihi nedir",
+    "bu konuyla ilgili film veya belgesel var mı",
+    "bu konuyu öğrenmenin ne faydası var",
+    "bu konuyu sevmiyorum ne yapmalıyım",
+    "bu konuyla ilgili yarışmalar var mı",
+    "bu konuyu gelecekte kullanacak mıyım",
+    "bu konuda kariyer yapabilir miyim",
+    "bu konuyu anlattığınız için teşekkür ederim, iyi günler",
+    "bu konudan nefret ediyorum, çok sıkıcı geliyor diye şikayet ediyorum",
+    "bu uygulamayı nasıl kullanacağımı soruyorum",
+    "sınavda bu konudan kaç soru çıkar diye tahmin istiyorum",
+    "bu konuyu çalışırken müzik dinlesem mi diye tavsiye istiyorum",
+    "bu konuyla ilgili önerebileceğin bir YouTube kanalı var mı diye soruyorum",
+]
+
+
+def _sinif_kisa_tanim(sinif_adi):
+    """Bir sınıfın SINIF_TANIMLARI içindeki kısa tanımını döndürür (bulunamazsa sınıf adını)."""
+    bilgi = SINIF_TANIMLARI.get(sinif_adi)
+    return bilgi["tanim"] if bilgi else sinif_adi
+
+
+def _sinif_dogal_ad(sinif_adi):
+    """Bir sınıfın doğal dil karşılığını döndürür (bulunamazsa sınıf adının kendisi)."""
+    return SINIF_DOGAL_ADLARI.get(sinif_adi, sinif_adi)
+
+
+def _hedef_tanimini_formatla(hedef_niyet):
+    """Hedef sınıfın TAM tanımını (tanım + örnekler + fark) talimat metni olarak döndürür."""
+    bilgi = SINIF_TANIMLARI.get(hedef_niyet)
+    if not bilgi:
+        return f"HEDEF NİYET: '{hedef_niyet}' kategorisine ait bir talep yaz."
+    ornekler_metni = "\n".join(f"  - \"{orn}\"" for orn in bilgi["ornekler"])
+    return (
+        f"HEDEF NİYET TANIMI — {hedef_niyet}:\n"
+        f"{bilgi['tanim']}\n"
+        f"Örnekler:\n{ornekler_metni}\n"
+        f"Karıştırılmaması gereken fark: {bilgi['fark']}"
+    )
+
+
+def _celdirici_sinifi_formatla(celdirici_sinif):
+    """Çeldirici sınıfın KISA tanımını talimat metni olarak döndürür."""
+    return f"ÇELDİRİCİ SINIF (yalnızca yan unsur olarak kullan) — {celdirici_sinif}:\n{_sinif_kisa_tanim(celdirici_sinif)}"
+
+
+def _yasakli_ifade_var_mi(metin):
+    """Metinde YASAKLI_IFADELER listesindeki bir ifade kelime sınırlı olarak geçiyor mu kontrol eder."""
+    for ifade in YASAKLI_IFADELER:
+        kalip = r"(?<!\w)" + re.escape(ifade) + r"(?!\w)"
+        if re.search(kalip, metin, re.IGNORECASE):
+            return True
+    return False
+
+
+def _uretim_sayacini_artir():
+    """Ekranda gösterilen cümle değiştiğinde çağrılır; 'Nihai karar' selectbox'ının
+    key'i buna bağlı olduğu için seçim otomatik olarak boşa döner."""
+    st.session_state.uretim_sayaci = st.session_state.get("uretim_sayaci", 0) + 1
+
+
+def _gemini_ciktisini_temizle(metin):
+    """Gemini'den gelen metindeki baştaki/sondaki tırnak işaretlerini ve 'Öğrenci:' gibi önekleri temizler."""
+    metin = metin.strip()
+    metin = metin.strip("\"'“”‘’`")
+    metin = re.sub(r"^(öğrenci|ogrenci|student)\s*[:：]\s*", "", metin, flags=re.IGNORECASE)
+    return metin.strip()
 
 # ------------------------------------------------------------------
 # TASARIM SİSTEMİ — "Lab Console" tema
@@ -62,78 +247,184 @@ st.markdown(
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
     :root {
-        --bg: #F5F9FD;
-        --surface: #EAF2FA;
-        --surface-2: #DCEAF7;
-        --border: #C7DEF2;
-        --border-strong: #A9CBEB;
-        --text: #10151C;
-        --text-muted: #4B5A6B;
-        --text-faint: #8AA0B5;
-        --accent: #1D6FD8;
-        --accent-strong: #1558AE;
-        --accent-soft: rgba(29, 111, 216, 0.10);
+        --bg: #F2F7FD;
+        --surface: #E9F1FA;
+        --surface-2: #FFFFFF;
+        --surface-3: #DEEAF7;
+        --border: #D3E3F4;
+        --border-strong: #AFCFEC;
+        --text: #0F141B;
+        --text-muted: #4A5967;
+        --text-faint: #8299AF;
+        --accent: #1B6FDA;
+        --accent-strong: #14579F;
+        --accent-soft: rgba(27, 111, 218, 0.10);
+        --accent-ring: rgba(27, 111, 218, 0.26);
         --chosen: #15803D;
         --rejected: #C2670C;
         --danger: #C0293D;
-        --radius: 10px;
+        --radius: 12px;
+        --radius-sm: 8px;
+        --shadow-sm: 0 1px 2px rgba(15, 32, 56, 0.06);
+        --shadow-md: 0 4px 14px rgba(15, 32, 56, 0.08);
+        --shadow-lg: 0 12px 32px rgba(15, 32, 56, 0.13);
     }
 
     html, body, [data-testid="stAppViewContainer"], .main { background-color: var(--bg) !important; }
+    /* Sayfa zeminine çok hafif bir ışık gradyanı — düz rengin yüzeysizliğini kırar */
+    [data-testid="stAppViewContainer"] {
+        background-image:
+            radial-gradient(1100px 500px at 12% -8%, rgba(27, 111, 218, 0.07), transparent 60%),
+            radial-gradient(900px 420px at 92% 0%, rgba(21, 128, 61, 0.05), transparent 62%) !important;
+        background-attachment: fixed !important;
+    }
     [data-testid="stHeader"] { background-color: transparent !important; }
     [data-testid="stSidebar"] { background-color: var(--surface) !important; border-right: 1px solid var(--border); }
+
+    /* İnce kaydırma çubuğu */
+    ::-webkit-scrollbar { width: 11px; height: 11px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; border: 3px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+    /* Klavyeyle gezinenler için görünür odak halkası */
+    button:focus-visible, input:focus-visible, textarea:focus-visible, [role="option"]:focus-visible {
+        outline: 2px solid var(--accent) !important; outline-offset: 2px !important;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+    }
 
     * { font-family: 'Inter', sans-serif; }
     h1, h2, h3, h4, h5 { font-family: 'Space Grotesk', sans-serif !important; color: var(--text) !important; letter-spacing: -0.01em; }
     p, span, label, div { color: var(--text); }
     code, .mono { font-family: 'JetBrains Mono', monospace !important; }
 
+    /* Tipografi ölçeği — başlıklar arası hiyerarşiyi netleştirir */
+    h1 { font-size: 2rem !important; font-weight: 700 !important; letter-spacing: -0.025em !important; line-height: 1.18 !important; }
+    h2 { font-size: 1.36rem !important; font-weight: 600 !important; letter-spacing: -0.018em !important; margin-bottom: 0.2rem !important; }
+    h3 { font-size: 1.12rem !important; font-weight: 600 !important; }
+    /* "##### Alt başlık" kullanımları mikro-etikete dönüşür (lab-konsol dili) */
+    h5 {
+        font-size: 0.8rem !important; font-weight: 700 !important;
+        text-transform: uppercase; letter-spacing: 0.09em !important;
+        color: var(--text-muted) !important; margin-bottom: 0.55rem !important;
+    }
+    p { line-height: 1.62; }
+    ::selection { background: rgba(27, 111, 218, 0.22); }
+
+    /* İçerik sütunu — geniş ekranda satırların okunamayacak kadar uzamasını engeller */
+    .main .block-container, [data-testid="stMainBlockContainer"] {
+        max-width: 1200px !important;
+        padding-top: 2.1rem !important; padding-bottom: 3.6rem !important;
+    }
+
+    /* "Deploy" düğmesi gizlenir — uygulama kendi başına bir araç gibi görünsün */
+    [data-testid="stAppDeployButton"] { display: none !important; }
+
     /* Sekme içerik alanlarına hafif nefes payı */
     .stTabs [data-baseweb="tab-panel"] { padding-top: 20px; }
 
     /* Durum rozeti */
-    .status-badge { display: inline-flex; align-items: center; gap: 7px; font-family: 'JetBrains Mono', monospace; font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-muted); }
+    .status-badge {
+        display: inline-flex; align-items: center; gap: 7px;
+        font-family: 'JetBrains Mono', monospace; font-size: 12px;
+        padding: 6px 13px; border-radius: 999px;
+        border: 1px solid var(--border-strong); color: var(--text-muted);
+        background: var(--surface-2); box-shadow: var(--shadow-sm);
+    }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
-    .status-dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .status-dot.on { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft), 0 0 7px var(--accent); }
 
     /* Metric rozetleri */
-    .metric-badge { background-color: var(--accent-soft); color: var(--accent); padding: 6px 14px; border-radius: 999px; font-weight: 600; font-family: 'JetBrains Mono', monospace; font-size: 13px; display: inline-block; border: 1px solid rgba(29, 111, 216, 0.25); }
-    .tag-chosen { color: var(--chosen); border: 1px solid rgba(21, 128, 61, 0.3); background: rgba(21, 128, 61, 0.08); padding: 4px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; }
-    .tag-rejected { color: var(--rejected); border: 1px solid rgba(194, 103, 12, 0.3); background: rgba(194, 103, 12, 0.08); padding: 4px 10px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 600; }
+    .metric-badge {
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.14), rgba(27, 111, 218, 0.07));
+        color: var(--accent); padding: 7px 15px; border-radius: 999px; font-weight: 600;
+        font-family: 'JetBrains Mono', monospace; font-size: 13px; display: inline-block;
+        border: 1px solid rgba(27, 111, 218, 0.28); box-shadow: var(--shadow-sm);
+    }
+    .tag-chosen {
+        color: var(--chosen); border: 1px solid rgba(21, 128, 61, 0.32);
+        background: linear-gradient(180deg, rgba(21, 128, 61, 0.13), rgba(21, 128, 61, 0.06));
+        padding: 5px 11px; border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; font-weight: 600; box-shadow: var(--shadow-sm);
+    }
+    .tag-rejected {
+        color: var(--rejected); border: 1px solid rgba(194, 103, 12, 0.32);
+        background: linear-gradient(180deg, rgba(194, 103, 12, 0.13), rgba(194, 103, 12, 0.06));
+        padding: 5px 11px; border-radius: var(--radius-sm); font-family: 'JetBrains Mono', monospace;
+        font-size: 12px; font-weight: 600; box-shadow: var(--shadow-sm);
+    }
 
     /* Olasılık çubukları (signal meter) */
-    .prob-row { display: flex; align-items: center; gap: 12px; margin: 7px 0; }
+    .prob-row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
     .prob-label { width: 30%; font-size: 13px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .prob-track { flex: 1; height: 8px; background: var(--surface-2); border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
-    .prob-fill { height: 100%; border-radius: 4px; background: var(--accent); }
-    .prob-fill.top { background: linear-gradient(90deg, var(--accent-strong), var(--accent)); }
-    .prob-value { width: 52px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text); }
+    .prob-track {
+        flex: 1; height: 9px; background: var(--surface-3); border-radius: 999px;
+        overflow: hidden; border: 1px solid var(--border);
+        box-shadow: inset 0 1px 2px rgba(15, 32, 56, 0.06);
+    }
+    .prob-fill {
+        height: 100%; border-radius: 999px; background: var(--accent);
+        transition: width 0.35s cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
+    .prob-fill.top {
+        background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+        box-shadow: 0 0 10px rgba(27, 111, 218, 0.35);
+    }
+    .prob-value { width: 52px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 500; color: var(--text); }
 
     /* Streamlit bileşen override'ları */
     .stButton>button, .stDownloadButton>button {
-        border-radius: 7px; font-weight: 600; font-family: 'Inter', sans-serif;
-        border: 1px solid var(--border-strong); transition: all 0.15s ease;
-        background-color: var(--surface-2); color: var(--text);
+        border-radius: var(--radius-sm); font-weight: 600; font-family: 'Inter', sans-serif;
+        border: 1px solid var(--border-strong);
+        transition: transform 0.12s ease, box-shadow 0.18s ease, border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+        background-color: var(--surface-2); color: var(--text); box-shadow: var(--shadow-sm);
     }
-    .stButton>button:hover, .stDownloadButton>button:hover { border-color: var(--accent); color: var(--accent); }
+    .stButton>button:hover, .stDownloadButton>button:hover {
+        border-color: var(--accent); color: var(--accent);
+        background-color: var(--accent-soft);
+        transform: translateY(-1px); box-shadow: var(--shadow-md);
+    }
+    .stButton>button:active, .stDownloadButton>button:active { transform: translateY(0); box-shadow: var(--shadow-sm); }
     .stButton>button[kind="primary"], .stDownloadButton>button[kind="primary"] {
-        background-color: var(--accent); border-color: var(--accent); color: #FFFFFF;
+        background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+        border-color: var(--accent-strong); color: #FFFFFF;
+        box-shadow: 0 2px 8px rgba(27, 111, 218, 0.28);
     }
     .stButton>button[kind="primary"]:hover, .stDownloadButton>button[kind="primary"]:hover {
-        background-color: var(--accent-strong); color: #FFFFFF;
+        background: linear-gradient(180deg, var(--accent-strong), #11487F);
+        color: #FFFFFF; box-shadow: 0 6px 18px rgba(27, 111, 218, 0.34);
+    }
+    .stButton>button:disabled, .stDownloadButton>button:disabled {
+        opacity: 0.55; box-shadow: none; transform: none;
     }
 
     .stTextInput input, .stTextArea textarea, .stNumberInput input {
-        border-radius: 7px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius-sm) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important; color: var(--text) !important;
         font-family: 'JetBrains Mono', monospace !important; font-size: 13.5px !important;
         -webkit-text-fill-color: var(--text) !important;
+        box-shadow: inset 0 1px 2px rgba(15, 32, 56, 0.05) !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+    }
+    .stTextInput input:hover, .stTextArea textarea:hover, .stNumberInput input:hover { border-color: var(--text-faint) !important; }
+    .stTextInput input:focus, .stTextArea textarea:focus, .stNumberInput input:focus {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px var(--accent-ring) !important;
     }
     .stTextInput input::placeholder, .stTextArea textarea::placeholder { color: var(--text-faint) !important; opacity: 1 !important; }
 
     .stSelectbox [data-baseweb="select"] > div {
-        border-radius: 7px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius-sm) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important; color: var(--text) !important;
+        box-shadow: var(--shadow-sm) !important;
+        transition: border-color 0.18s ease, box-shadow 0.18s ease !important;
+    }
+    .stSelectbox [data-baseweb="select"] > div:hover { border-color: var(--text-faint) !important; }
+    .stSelectbox [data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent) !important; box-shadow: 0 0 0 3px var(--accent-ring) !important;
     }
     .stSelectbox [data-baseweb="select"] * { color: var(--text) !important; }
 
@@ -152,27 +443,52 @@ st.markdown(
     .stTabs [data-baseweb="tab-list"] { gap: 6px; border-bottom: 1px solid var(--border); }
     .stTabs [data-baseweb="tab"] {
         height: 44px; background-color: transparent; border: 1px solid transparent;
-        border-radius: 7px 7px 0 0; font-family: 'JetBrains Mono', monospace;
+        border-radius: var(--radius-sm) var(--radius-sm) 0 0; font-family: 'JetBrains Mono', monospace;
         font-size: 13px; color: var(--text-muted); padding: 0 18px;
+        transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
     }
+    .stTabs [data-baseweb="tab"]:hover { color: var(--accent); background-color: rgba(27, 111, 218, 0.055); }
     .stTabs [aria-selected="true"] {
-        color: var(--accent) !important; background-color: var(--accent-soft);
+        color: var(--accent) !important;
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.13), rgba(27, 111, 218, 0.04));
         border: 1px solid var(--border); border-bottom: 2px solid var(--accent);
     }
     .stTabs [data-baseweb="tab-highlight"] { background-color: transparent; }
 
+    /* Metrikler — zeminden ayrışan küçük kartlar */
+    [data-testid="stMetric"] {
+        background-color: var(--surface-2); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow-sm);
+        transition: box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    [data-testid="stMetric"]:hover { box-shadow: var(--shadow-md); border-color: var(--border-strong); }
     [data-testid="stMetricValue"] { font-family: 'JetBrains Mono', monospace !important; color: var(--accent) !important; font-size: 1.7rem !important; }
     [data-testid="stMetricLabel"] { color: var(--text-muted) !important; font-size: 12.5px !important; text-transform: uppercase; letter-spacing: 0.04em; }
 
-    .stProgress > div > div > div { background-color: var(--accent) !important; }
-    .stProgress > div > div { background-color: var(--surface-2) !important; }
+    .stProgress > div > div > div { background: linear-gradient(90deg, var(--accent-strong), var(--accent)) !important; border-radius: 999px !important; }
+    .stProgress > div > div { background-color: var(--surface-3) !important; border-radius: 999px !important; }
 
-    [data-testid="stFileUploaderDropzone"] { background-color: var(--surface-2) !important; border: 1px dashed var(--border-strong) !important; border-radius: var(--radius) !important; }
+    [data-testid="stFileUploaderDropzone"] {
+        background-color: var(--surface-2) !important; border: 1px dashed var(--border-strong) !important;
+        border-radius: var(--radius) !important; transition: border-color 0.18s ease, background-color 0.18s ease !important;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover { border-color: var(--accent) !important; background-color: var(--accent-soft) !important; }
+
+    /* st.status / expander yüzeyleri */
+    [data-testid="stExpander"], details {
+        border: 1px solid var(--border) !important; border-radius: var(--radius) !important;
+        background-color: var(--surface-2) !important; box-shadow: var(--shadow-sm) !important;
+    }
+
+    /* Yardımcı metinler (st.caption) */
+    [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] * { color: var(--text-muted) !important; }
 
     /* Bildirim kutuları (info/success/warning/error) — Streamlit sürümüne göre 2 farklı isimlendirmeyi de kapsar */
     .stAlert, [data-testid="stAlertContainer"], [data-testid^="stNotification"] {
-        border-radius: 8px !important; border: 1px solid var(--border-strong) !important;
+        border-radius: var(--radius) !important; border: 1px solid var(--border-strong) !important;
         background-color: var(--surface-2) !important;
+        box-shadow: var(--shadow-sm) !important;
+        border-left: 3px solid var(--accent) !important;
     }
     .stAlert *, [data-testid="stAlertContainer"] *, [data-testid^="stNotification"] * { color: var(--text) !important; }
     .stAlert [data-testid*="Success"], [data-testid="stAlertContainer"]:has(svg[data-testid*="Success"]) * ,
@@ -184,7 +500,92 @@ st.markdown(
     .stAlert [data-testid*="Info"], [data-testid="stAlertContainer"]:has(svg[data-testid*="Info"]) *,
     [data-testid="stNotificationContentInfo"] { color: var(--accent) !important; }
 
-    hr { border-color: var(--border) !important; }
+    /* Sol vurgu şeridi bildirim türüne göre renklenir */
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Success"]) { border-left-color: var(--chosen) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Warning"]) { border-left-color: var(--rejected) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Error"]) { border-left-color: var(--danger) !important; }
+    [data-testid="stAlertContainer"]:has(svg[data-testid*="Info"]) { border-left-color: var(--accent) !important; }
+
+    hr { border: none !important; height: 1px !important; background: linear-gradient(90deg, var(--border), rgba(211, 227, 244, 0.25)) !important; margin: 1.45rem 0 !important; }
+
+    /* ---------- Bileşen cilası ---------- */
+
+    /* Widget etiketleri — küçük, sakin, tutarlı */
+    [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label, .stSelectbox label, .stTextInput label, .stTextArea label {
+        font-size: 12.5px !important; font-weight: 600 !important;
+        color: var(--text-muted) !important; letter-spacing: 0.01em !important;
+        line-height: 1.5 !important;
+    }
+
+    /* Çalışma modu seçimi — segment düğmeleri hissi */
+    [data-testid="stRadio"] [role="radiogroup"] { gap: 8px; flex-wrap: wrap; }
+    [data-testid="stRadio"] [role="radiogroup"] > label {
+        background: var(--surface-2); border: 1px solid var(--border-strong);
+        border-radius: 999px; padding: 7px 15px; margin: 0;
+        box-shadow: var(--shadow-sm);
+        transition: border-color 0.18s ease, background-color 0.18s ease, box-shadow 0.18s ease, transform 0.12s ease;
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:hover {
+        border-color: var(--accent); background: var(--accent-soft); transform: translateY(-1px);
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) {
+        border-color: var(--accent);
+        background: linear-gradient(180deg, rgba(27, 111, 218, 0.13), rgba(27, 111, 218, 0.05));
+        box-shadow: 0 0 0 3px var(--accent-ring);
+    }
+    [data-testid="stRadio"] [role="radiogroup"] > label:has(input:checked) p { color: var(--accent) !important; font-weight: 600 !important; }
+
+    /* Metin alanı — uzun cümleleri rahat okuyup düzenlemek için */
+    .stTextArea textarea {
+        line-height: 1.66 !important; padding: 12px 14px !important;
+        caret-color: var(--accent) !important; resize: vertical !important;
+    }
+    .stTextInput input, .stNumberInput input { padding: 10px 13px !important; }
+
+    /* Düğme ölçüsü — satır içi düğmeler aynı yükseklikte hizalanır */
+    .stButton>button, .stDownloadButton>button {
+        min-height: 42px; font-size: 13.5px; letter-spacing: 0.005em; padding: 0 16px;
+    }
+
+    /* Açılır liste seçenekleri — dokunma hedefi ve ayrışma */
+    div[role="listbox"], div[data-baseweb="popover"] ul { padding: 6px !important; }
+    div[data-baseweb="popover"] li, div[role="listbox"] li, ul[role="listbox"] li, div[data-baseweb="popover"] [role="option"] {
+        padding: 9px 12px !important; border-radius: var(--radius-sm) !important;
+        font-size: 13.5px !important; transition: background-color 0.14s ease, color 0.14s ease !important;
+    }
+
+    /* Sayısal girdi artır/azalt düğmeleri */
+    [data-testid="stNumberInputStepUp"], [data-testid="stNumberInputStepDown"] {
+        background-color: var(--surface-3) !important; border-color: var(--border-strong) !important;
+        color: var(--text-muted) !important;
+    }
+    [data-testid="stNumberInputStepUp"]:hover, [data-testid="stNumberInputStepDown"]:hover {
+        background-color: var(--accent-soft) !important; color: var(--accent) !important;
+    }
+
+    /* Yardım baloncukları */
+    [data-baseweb="tooltip"] {
+        background: #121922 !important; border-radius: var(--radius-sm) !important;
+        font-size: 12.5px !important; line-height: 1.5 !important;
+        box-shadow: var(--shadow-lg) !important; border: none !important;
+    }
+    [data-baseweb="tooltip"] * { color: #F2F7FD !important; }
+
+    /* Satır içi kod parçaları (dosya yolu/isim gösterimleri) */
+    code {
+        background: var(--surface-3) !important; border: 1px solid var(--border) !important;
+        border-radius: 6px !important; padding: 2px 6px !important;
+        font-size: 12.5px !important; color: var(--accent-strong) !important;
+    }
+
+    /* Yükleniyor göstergesi */
+    .stSpinner > div, [data-testid="stSpinner"] > div { border-top-color: var(--accent) !important; }
+
+    /* Sütunlar dar ekranda sıkışmasın */
+    @media (max-width: 720px) {
+        .main .block-container, [data-testid="stMainBlockContainer"] { padding-left: 1rem !important; padding-right: 1rem !important; }
+        .prob-label { width: 42%; }
+    }
     </style>
 """,
     unsafe_allow_html=True,
@@ -744,13 +1145,11 @@ with tab4:
                     else:
                         hedef_niyet = secilen_hedef_kategori
 
-                    if "Aşırı Zorlayıcı" in secilen_zorluk:
-                        stil_talimati = f"NİYETİN: '{hedef_niyet}' kategorisine ait olmak. Ancak cümlede başka niyetlerin kelimelerini çeldirici olarak kullanarak modeli şaşırt ve zorla."
-                    else:
-                        stil_talimati = f"'{hedef_niyet}' kategorisine uygun doğal bir talep ilet."
+                    # Her çağrıda rastgele çeşitlilik: üslup (normal kategori üretiminde kullanılır)
+                    secilen_uslup = random.choice(URETIM_USLUPLARI)
 
                     if "Kısa" in secilen_uzunluk:
-                        uzunluk_talimati = "Cümle tek parça, kısa ve öz olsun."
+                        uzunluk_talimati = "Cümle tek parça, kısa ve öz olsun (3-10 kelime arası)."
                     elif "Uzun" in secilen_uzunluk:
                         uzunluk_talimati = "Cümle detaylı, bağlam içeren uzun bir cümle olsun."
                     else:
@@ -769,25 +1168,15 @@ with tab4:
                     if hedef_kapsam_disi and kapsam_disi_mod == "excel":
                         # Mod 1: Excel'deki ders konusunu kullan ama kapsam dışı talep yaz
                         # Örn: Matematik konusunda ama "bunu arkadaşıma nasıl anlatabilirim?"
-                        kapsam_disi_talepler = [
-                            "bu konuyu arkadaşıma nasıl anlatabilirim",
-                            "bu konuyla ilgili kitap önerir misin",
-                            "bu konuyu kimler icat etmiş",
-                            "bu konunun tarihi nedir",
-                            "bu konuyla ilgili film veya belgesel var mı",
-                            "bu konuyu öğrenmenin ne faydası var",
-                            "bu konuyu sevmiyorum ne yapmalıyım",
-                            "bu konuyla ilgili yarışmalar var mı",
-                            "bu konuyu gelecekte kullanacak mıyım",
-                            "bu konuda kariyer yapabilir miyim",
-                        ]
-                        secilen_talep = random.choice(kapsam_disi_talepler)
+                        secilen_talep = random.choice(KAPSAM_DISI_TALEPLERI)
                         prompt_to_gemini = (
                             f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
                             f"Sistem yalnızca şu kategorilerdeki istekleri işliyor: {', '.join(_siniflar[:6])} vb.\n"
                             f"GÖREV: '{secilen_konu}' konusundan bahseden ama sisteme uygun bir DERS TALEBİ (soru sorma, "
                             f"alıştırma isteme, açıklama isteme vb.) olmayan, bunun yerine '{secilen_talep}' "
-                            f"şeklinde bir mesaj yaz. Bu mesaj sisteme kapsam dışı görünmeli.\n"
+                            f"şeklinde bir mesaj yaz. Bu mesaj sisteme kapsam dışı görünmeli. Diğer sınıfların kelimeleri "
+                            f"(örn. 'özetin çok işime yaradı, teşekkürler' gibi) çeldirici/yan unsur olarak geçebilir.\n"
+                            f"ÜSLUP: {secilen_uslup}\n"
                             f"UZUNLUK: {uzunluk_talimati}\n"
                             f"KURAL: Sadece öğrencinin kuracağı TEK BİR doğal cümle ver. Kategori adını yazma."
                         )
@@ -810,11 +1199,15 @@ with tab4:
                             "sosyal medya ve internet",
                         ]
                         kapsam_disi_tema = random.choice(kapsam_disi_temalar)
+                        # Günlük hayat mesajında öğretmene hitap doğal olmadığı için "Hocam"lı üslubu hariç tut
+                        gunluk_usluplar = [u for u in URETIM_USLUPLARI if "Hocam" not in u]
+                        secilen_uslup = random.choice(gunluk_usluplar)
                         prompt_to_gemini = (
                             f"Bir yapay zeka eğitim asistanı sistemini test ediyorsun. "
                             f"Bu sistem yalnızca ders/eğitim sorularını yanıtlamak için tasarlanmış.\n"
                             f"GÖREV: Eğitimle, okulla, derslerle veya akademik konularla HİÇBİR İLGİSİ OLMAYAN, "
                             f"tamamen alakasız ve konu dışı bir mesaj yaz. Tema: {kapsam_disi_tema}\n"
+                            f"ÜSLUP: {secilen_uslup} Kısa ve doğal sohbet cümleleri de olabilir.\n"
                             f"UZUNLUK: {uzunluk_talimati}\n"
                             f"KURAL: Mesajda ders, ödev, konu, formül, öğretmen, okul gibi eğitimle ilgili hiçbir "
                             f"kelime KULLANMA. Sadece sıradan bir kullanıcının kuracağı TEK BİR cümle ver."
@@ -823,22 +1216,68 @@ with tab4:
 
                     else:
                         # Normal niyet kategorisi
-                        prompt_to_gemini = (
-                            f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n"
-                            f"GÖREV: {stil_talimati}\n"
-                            f"UZUNLUK: {uzunluk_talimati}\n"
-                            f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                        hedef_tanim_metni = _hedef_tanimini_formatla(hedef_niyet)
+                        yasakli_ifadeler_metni = ", ".join(f'"{ifade}"' for ifade in YASAKLI_IFADELER)
+                        uretilmeyecek_tur_metni = (
+                            "ÜRETME: Öğrencinin konu hakkında açıklama/bilgi istediği cümleler "
+                            "(\"bana X'i anlat\", \"...nasıl oldu merak ediyorum\") ÜRETME — bu tür istekler "
+                            "bu görevin kapsamında değil."
                         )
 
-                    response = client.models.generate_content(
-                        model=gemini_model_secimi, contents=prompt_to_gemini
-                    )
-                    generated_text = response.text.strip()
+                        if "Aşırı Zorlayıcı" in secilen_zorluk:
+                            # Hedef dışındaki sınıflardan rastgele bir çeldirici sınıf seç
+                            diger_siniflar = [s for s in _siniflar if s != hedef_niyet]
+                            celdirici_sinif = random.choice(diger_siniflar) if diger_siniflar else hedef_niyet
+                            celdirici_tanim_metni = _celdirici_sinifi_formatla(celdirici_sinif)
+                            celdirici_teknik = random.choice(CELDIRICI_TEKNIKLERI).format(
+                                celdirici_dogal=_sinif_dogal_ad(celdirici_sinif),
+                                hedef_dogal=_sinif_dogal_ad(hedef_niyet),
+                            )
+                            gorev_metni = (
+                                f"GÖREV: Cümlenin ASIL isteği {hedef_niyet} olmalı. Yanıtta {celdirici_sinif} sınıfının "
+                                f"kelimeleri yalnızca YAN UNSUR olarak geçebilir (olumsuzlanmış, reddedilmiş, geçmişte "
+                                f"kalmış veya ertelenmiş bir istek olarak). İki isteği EŞİT AĞIRLIKTA birleştirme.\n"
+                                f"ÇELDİRİCİ TEKNİK: {celdirici_teknik}"
+                            )
+                            prompt_to_gemini = (
+                                f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n\n"
+                                f"{hedef_tanim_metni}\n\n"
+                                f"{celdirici_tanim_metni}\n\n"
+                                f"{gorev_metni}\n"
+                                f"ÜSLUP: {secilen_uslup}\n"
+                                f"UZUNLUK: {uzunluk_talimati}\n"
+                                f"YASAKLI İFADELER: Şu kelime/ifadeleri KULLANMA: {yasakli_ifadeler_metni}.\n"
+                                f"{uretilmeyecek_tur_metni}\n"
+                                f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                            )
+                        else:
+                            prompt_to_gemini = (
+                                f"Sen liseli bir öğrencisin. Yapay zeka öğretmenine '{secilen_konu}' konusuyla ilgili mesaj yaz.\n\n"
+                                f"{hedef_tanim_metni}\n\n"
+                                f"GÖREV: '{hedef_niyet}' kategorisine uygun doğal bir talep ilet.\n"
+                                f"ÜSLUP: {secilen_uslup}\n"
+                                f"UZUNLUK: {uzunluk_talimati}\n"
+                                f"YASAKLI İFADELER: Şu kelime/ifadeleri KULLANMA: {yasakli_ifadeler_metni}.\n"
+                                f"{uretilmeyecek_tur_metni}\n"
+                                f"KURAL: Asla kategori adını metne yansıtma. Sadece öğrencinin kuracağı TEK BİR cümle ver."
+                            )
+
+                    # Gemini çağrısı — yasaklı ifade geçerse bir kez yeniden üret
+                    generated_text = ""
+                    for _deneme in range(2):
+                        response = client.models.generate_content(
+                            model=gemini_model_secimi, contents=prompt_to_gemini
+                        )
+                        generated_text = _gemini_ciktisini_temizle(response.text)
+                        if not _yasakli_ifade_var_mi(generated_text):
+                            break
+
                     st.session_state.generated_test_text = generated_text
 
                     tahmin, sirali_probs = modelle_tahmin_et(generated_text)
                     st.session_state.bert_prediction = tahmin
                     st.session_state.bert_probabilities = sirali_probs
+                    _uretim_sayacini_artir()
                     return True
 
                 except Exception as e:
@@ -884,6 +1323,7 @@ with tab4:
                         tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
                         st.session_state.bert_prediction = tahmin
                         st.session_state.bert_probabilities = sirali_probs
+                        _uretim_sayacini_artir()
                         st.rerun()
                     else:
                         st.warning("Lütfen tahmin için bir metin girin.")
@@ -915,6 +1355,7 @@ with tab4:
                             tahmin, sirali_probs = modelle_tahmin_et(guncel_soru)
                             st.session_state.bert_prediction = tahmin
                             st.session_state.bert_probabilities = sirali_probs
+                            _uretim_sayacini_artir()
                             st.rerun()
                         else:
                             st.warning("Lütfen tahmin için bir metin girin.")
@@ -924,9 +1365,12 @@ with tab4:
                             if otomatik_soru_uret():
                                 st.rerun()
 
-            # Eğer kullanıcı metni değiştirdiyse ancak butona basmadıysa da güncel tutalım
+            # Eğer kullanıcı metni değiştirdiyse ancak butona basmadıysa da güncel tutalım.
+            # Metin değiştiği için önceki "Nihai karar" seçimi artık geçerli değil; sayacı
+            # artırarak seçimi sıfırlıyoruz (bu blok selectbox render edilmeden önce çalışır).
             if guncel_soru != st.session_state.generated_test_text:
                 st.session_state.generated_test_text = guncel_soru
+                _uretim_sayacini_artir()
 
             # Olasılık Dağılımı ve Tahmin Kartı
             if st.session_state.get("bert_prediction"):
@@ -972,6 +1416,7 @@ with tab4:
                     "Nihai karar — gerçekte olması gereken CHOSEN kategori:",
                     st.session_state.classes,
                     index=default_idx,
+                    key=f"nihai_karar_{st.session_state.get('uretim_sayaci', 0)}",
                 )
 
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -984,6 +1429,8 @@ with tab4:
                     aktif_metin = guncel_soru.strip()
                     if not aktif_metin:
                         st.error("Metin kutusu boş olamaz.")
+                    elif gercek_dogru_kategori is None:
+                        st.error("Lütfen 'Nihai karar' kutusundan doğru kategoriyi seçin.")
                     else:
                         aktif_tahmin, _ = modelle_tahmin_et(aktif_metin)
                         if aktif_tahmin == gercek_dogru_kategori:
@@ -1024,6 +1471,7 @@ with tab4:
                                     st.session_state.generated_test_text = ""
                                     st.session_state.bert_prediction = None
                                     st.session_state.bert_probabilities = []
+                                    _uretim_sayacini_artir()
                                 status.update(
                                     label="Hazır.", state="complete", expanded=False
                                 )
@@ -1043,6 +1491,7 @@ with tab4:
                             st.session_state.generated_test_text = ""
                             st.session_state.bert_prediction = None
                             st.session_state.bert_probabilities = []
+                            _uretim_sayacini_artir()
                         status.update(label="Hazır.", state="complete", expanded=False)
                     st.rerun()
 

@@ -14,7 +14,22 @@ __pycache__/
 # Eğitim çıktıları / model ağırlıkları (repoya taşınmasın, çok büyük olur)
 niyet_bert_model/
 niyet_bert_results/
-temp_dataset.jsonl
+checkpoint-*/
+*.safetensors
+*.bin
+*.pt
+*.npy
+
+# Veri setleri ve veri kaynakları (projeye ait veri; repoya gitmez)
+*.jsonl
+*.xlsx
+*.xls
+*.csv
+
+# Geçici çıktılar
+degisiklik.diff
+*.diff
+*.log
 
 # İşletim sistemi
 .DS_Store

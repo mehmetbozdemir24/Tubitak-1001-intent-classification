@@ -1,6 +1,10 @@
 # Intent & Alignment Studio
 
-Türkçe niyet (intent) sınıflandırma için BERT modeli eğitip test etmeyi ve insan denetimli DPO hizalama verisi toplamayı tek arayüzden yapan Streamlit uygulaması.
+Türkçe öğrenci mesajlarını niyet sınıflarına ayıran BERT modelini eğitip test etmeyi ve insan denetimli DPO hizalama verisi toplamayı tek arayüzden yapan Streamlit uygulaması.
+
+Model: `dbmdz/bert-base-turkish-cased`
+
+Sınıflar: `Bilgi_Karti`, `Anahtar_Kavram_Ozet`, `Kavramsal_Soru`, `Uyarlanabilir_Soru`, `Yanlis_Cevap_Aciklama`, `Kapsam_Disi`
 
 ## Kurulum
 
@@ -21,13 +25,34 @@ Uygulama 4 sekmeden oluşur, sırayla kullanılır:
 1. **Veri & Model** — JSONL formatında etiketli veri yükleyip yeni bir BERT modeli eğit, ya da daha önce eğitilmiş bir modeli klasör yolundan yükle.
 2. **Performans** — eğitilen/yüklenen modelin accuracy, F1, precision, recall değerlerini ve confusion matrix'ini görüntüle.
 3. **Manuel Test** — model yüklüyken serbest metin gir, tahmin edilen niyeti ve sınıf olasılık dağılımını gör.
-4. **DPO Toplama** — Gemini API anahtarını gir, Excel'deki konu listesinden otomatik soru ürettir, modelin yanlış tahmin ettiği örnekleri chosen/rejected çifti olarak onaylayıp `.jsonl` formatında indir.
+4. **DPO Toplama** — Gemini API anahtarını gir, Excel'deki konu listesinden otomatik cümle ürettir, modelin yanlış tahmin ettiği örnekleri chosen/rejected çifti olarak onayla. Kayıtlar `dpo_dataset.jsonl` dosyasına eklenir.
 
-## Gerekli dosyalar
+## Repoda bulunmayan, yerelde hazır olması gereken dosyalar
 
-- `Ders_konu_bilissel-seviye_öğrenme-çıktısı.xlsx` — DPO sekmesinde otomatik soru üretimi için konu kaynağı.
-- Gemini API anahtarı — sadece DPO sekmesinde, uygulama içinden girilir; koda yazılmaz.
+Veri setleri, model ağırlıkları ve veri kaynakları `.gitignore` ile hariç tutulmuştur. Uygulamayı çalıştırmak için bunları proje kökünde kendiniz bulundurmanız gerekir:
 
-## Not
+| Dosya / klasör | Ne için gerekli |
+| --- | --- |
+| `Ders_konu_bilissel-seviye_öğrenme-çıktısı.xlsx` | DPO sekmesinde konu kaynağı. `Konu Adı` sütunu zorunludur. |
+| Eğitim veri seti (`.jsonl`) | "Veri & Model" sekmesinden yüklenir. |
+| `niyet_bert_model/` | Daha önce eğitilmiş modeli yüklemek için. Yoksa sekme 1'den eğitilir. |
 
-`niyet_bert_model/` (eğitilen model ağırlıkları) `.gitignore` ile hariç tutulmuştur; büyük boyutları nedeniyle repoya dahil edilmez.
+Gemini API anahtarı koda yazılmaz; yalnızca DPO sekmesindeki şifre kutusundan girilir.
+
+## Veri formatları
+
+Eğitim veri seti — her satır bir örnek:
+
+```json
+{"text": "integral formüllerini özetler misin", "label": "Anahtar_Kavram_Ozet"}
+```
+
+DPO çıktısı (`dpo_dataset.jsonl`) — `chosen` insan kararı, `rejected` modelin hatalı tahmini:
+
+```json
+{"prompt": "...", "chosen": "Bilgi_Karti", "rejected": "Anahtar_Kavram_Ozet", "konu": "Hücre Zarından Madde Geçişi"}
+```
+
+## Eğitim çıktıları
+
+Eğitim sonunda model ve tokenizer `niyet_bert_model/`, Trainer çıktıları `niyet_bert_results/` klasörüne yazılır. İkisi de repoya dahil edilmez.
